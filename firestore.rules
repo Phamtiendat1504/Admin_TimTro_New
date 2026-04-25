@@ -1,0 +1,256 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc(uid) {
+      return get(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function userExists(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid));
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && userExists(request.auth.uid)
+        && userDoc(request.auth.uid).data.role == "admin";
+    }
+
+    function canPostRoom() {
+      return isSignedIn()
+        && (
+          isAdmin()
+          || (
+            userExists(request.auth.uid)
+            && userDoc(request.auth.uid).data.isVerified == true
+            && (
+              !("postingUnlockAt" in userDoc(request.auth.uid).data)
+              || userDoc(request.auth.uid).data.postingUnlockAt <= request.time.toMillis()
+            )
+          )
+        );
+    }
+
+    function isAppointmentParticipant(apptId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/appointments/$(apptId))
+        && (
+          isAdmin()
+          || request.auth.uid == get(/databases/$(database)/documents/appointments/$(apptId)).data.tenantId
+          || request.auth.uid == get(/databases/$(database)/documents/appointments/$(apptId)).data.landlordId
+        );
+    }
+
+    function isChatParticipant(chatId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/chats/$(chatId))
+        && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+    }
+
+    // USERS
+    match /users/{userId} {
+      allow read: if true;
+
+      allow create: if isAdmin() || (
+        isSignedIn()
+        && request.auth.uid == userId
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.role == "user"
+        && request.resource.data.isVerified == false
+        && request.resource.data.isLocked == false
+        && request.resource.data.lockUntil == 0
+      );
+
+      allow update: if isAdmin() || (
+        isSignedIn()
+        && request.auth.uid == userId
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.role in ["user", "pending"]
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          "fullName",
+          "email",
+          "phone",
+          "address",
+          "birthday",
+          "gender",
+          "occupation",
+          "avatarUrl",
+          "fcmToken",
+          "lastLoginAt",
+          "isOnline",
+          "lastSeen",
+          "hasAcceptedRules",
+          "role"
+        ])
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ROOMS
+    match /rooms/{roomId} {
+      allow read: if resource.data.status in ["approved", "expired"]
+                  || (isSignedIn() && resource.data.userId == request.auth.uid)
+                  || isAdmin();
+
+      allow create: if canPostRoom()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.status == "pending";
+
+      allow update: if isAdmin()
+                    || (
+                      isSignedIn()
+                      && resource.data.userId == request.auth.uid
+                      && request.resource.data.userId == resource.data.userId
+                    );
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    // VERIFICATIONS
+    match /verifications/{userId} {
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+
+      allow create: if isSignedIn()
+                    && request.auth.uid == userId
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.status == "pending";
+
+      allow update: if isAdmin()
+                    || (
+                      isSignedIn()
+                      && request.auth.uid == userId
+                      && request.resource.data.userId == request.auth.uid
+                      && request.resource.data.status == "pending"
+                    );
+
+      allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+    }
+
+    // APPOINTMENTS
+    match /appointments/{apptId} {
+      allow read: if isAdmin()
+                  || (
+                    isSignedIn()
+                    && (
+                      request.auth.uid == resource.data.tenantId
+                      || request.auth.uid == resource.data.landlordId
+                    )
+                  );
+
+      allow create: if isSignedIn()
+                    && request.resource.data.tenantId == request.auth.uid
+                    && request.resource.data.status == "pending";
+
+      allow update: if isAdmin()
+                    || (
+                      isSignedIn()
+                      && (
+                        request.auth.uid == resource.data.tenantId
+                        || request.auth.uid == resource.data.landlordId
+                      )
+                      && request.resource.data.tenantId == resource.data.tenantId
+                      && request.resource.data.landlordId == resource.data.landlordId
+                      && request.resource.data.roomId == resource.data.roomId
+                      && request.resource.data.createdAt == resource.data.createdAt
+                    );
+
+      allow delete: if isAdmin()
+                    || (
+                      isSignedIn()
+                      && (
+                        request.auth.uid == resource.data.tenantId
+                        || request.auth.uid == resource.data.landlordId
+                      )
+                    );
+    }
+
+    // BOOKED SLOTS
+    match /bookedSlots/{slotId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() || isAppointmentParticipant(slotId);
+    }
+
+    // SAVED POSTS
+    match /savedPosts/{docId} {
+      allow read: if isSignedIn()
+                  && (
+                    isAdmin()
+                    || resource == null
+                    || resource.data.userId == request.auth.uid
+                  );
+
+      allow create: if isSignedIn()
+                    && request.resource.data.userId == request.auth.uid;
+
+      allow update, delete: if isSignedIn()
+                            && (
+                              isAdmin()
+                              || resource.data.userId == request.auth.uid
+                            );
+    }
+
+    // NOTIFICATIONS
+    match /notifications/{docId} {
+      allow read: if isSignedIn()
+                  && (
+                    isAdmin()
+                    || request.auth.uid == resource.data.userId
+                  );
+
+      allow create: if isSignedIn()
+                    && request.resource.data.userId is string
+                    && request.resource.data.title is string
+                    && request.resource.data.message is string
+                    && request.resource.data.createdAt is int
+                    && request.resource.data.seen == false;
+
+      allow update, delete: if isSignedIn()
+                            && (
+                              isAdmin()
+                              || request.auth.uid == resource.data.userId
+                            );
+    }
+
+    // CHATS
+    match /chats/{chatId} {
+      allow read: if isSignedIn()
+                  && (resource == null || request.auth.uid in resource.data.participants);
+
+      allow create: if isSignedIn()
+                    && request.auth.uid in request.resource.data.participants;
+
+      allow update, delete: if isSignedIn()
+                            && request.auth.uid in resource.data.participants;
+
+      match /messages/{messageId} {
+        allow read: if isChatParticipant(chatId);
+
+        allow create: if isChatParticipant(chatId)
+                      && request.auth.uid == request.resource.data.senderId;
+
+        allow update, delete: if isChatParticipant(chatId);
+      }
+    }
+
+    // Broadcast queue
+    match /system_notifications/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Internal checks
+    match /checks/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Server-side OCR counter (no client write needed)
+    match /verification_counters/{uid} {
+      allow read, write: if isAdmin();
+    }
+  }
+}

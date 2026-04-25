@@ -1,0 +1,152 @@
+/* ULTRA+++ CYBERPUNK & NEON GLASSMORPHISM THEME */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;600;700&display=swap');
+
+:root {
+  /* Holographic Light Mode */
+  --bg-app: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%);
+  --bg-card: rgba(255, 255, 255, 0.4);
+  --bg-sidebar: rgba(255, 255, 255, 0.5);
+  --border-color: rgba(255, 255, 255, 0.6);
+  --text-main: #1a1a2e;
+  --text-muted: #4a4e69;
+  --neon-glow: 0 0 15px rgba(142, 197, 252, 0.8);
+  --card-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.2);
+  --glass-blur: blur(20px);
+}
+
+[data-theme="dark"] {
+  /* Cyberpunk Dark Mode */
+  --bg-app: #0f0c29; /* Fallback */
+  --bg-card: rgba(15, 12, 41, 0.6);
+  --bg-sidebar: rgba(10, 5, 20, 0.8);
+  --border-color: rgba(0, 255, 255, 0.3);
+  --text-main: #e0ffff;
+  --text-muted: #8a9bbf;
+  --neon-glow: 0 0 20px rgba(0, 255, 255, 0.6), 0 0 40px rgba(255, 0, 255, 0.4);
+  --card-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.8);
+  --glass-blur: blur(15px);
+}
+
+/* Animated Background for Dark Mode */
+[data-theme="dark"] body {
+  background: linear-gradient(45deg, #0f0c29, #302b63, #24243e, #0f0c29);
+  background-size: 400% 400%;
+  animation: gradientBG 15s ease infinite;
+}
+
+@keyframes gradientBG {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+body {
+  font-family: 'Space Grotesk', sans-serif !important;
+  color: var(--text-main) !important;
+  transition: all 0.5s ease;
+}
+
+/* Glassmorphism Cards */
+.card, .stat-card, .login-card, .page-toolbar, .table-wrap, .toast, .modal-box {
+  background: var(--bg-card) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  -webkit-backdrop-filter: var(--glass-blur) !important;
+  border: 1px solid var(--border-color) !important;
+  box-shadow: var(--card-shadow) !important;
+  border-radius: 16px !important;
+  transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease !important;
+}
+
+/* Hover Effects */
+.stat-card:hover, .card:hover, .btn:hover {
+  transform: translateY(-5px) scale(1.02) !important;
+  box-shadow: var(--neon-glow) !important;
+  border-color: rgba(0, 255, 255, 0.8) !important;
+  z-index: 10;
+}
+
+/* Sidebar & Topbar */
+.sidebar, .topbar {
+  background: var(--bg-sidebar) !important;
+  backdrop-filter: var(--glass-blur) !important;
+  border-color: var(--border-color) !important;
+}
+
+/* Text Glow */
+.stat-value, .page-title, .brand-name {
+  text-shadow: 0 0 10px rgba(0, 255, 255, 0.5) !important;
+}
+
+/* Buttons - Neon Style */
+.btn {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-main) !important;
+  backdrop-filter: blur(5px) !important;
+  border-radius: 8px !important;
+  text-transform: uppercase;
+  font-weight: bold !important;
+  letter-spacing: 1px;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn::before {
+  content: '';
+  position: absolute;
+  top: 0; left: -100%; width: 50%; height: 100%;
+  background: linear-gradient(to right, transparent, rgba(255,255,255,0.3), transparent);
+  transform: skewX(-25deg);
+  animation: shine 3s infinite;
+}
+
+@keyframes shine {
+  0% { left: -100%; }
+  20% { left: 200%; }
+  100% { left: 200%; }
+}
+
+.btn-approve { border-color: #00ffcc !important; color: #00ffcc !important; }
+.btn-approve:hover { background: #00ffcc !important; color: #000 !important; box-shadow: 0 0 15px #00ffcc !important; }
+
+.btn-reject, .btn-delete { border-color: #ff0055 !important; color: #ff0055 !important; }
+.btn-reject:hover { background: #ff0055 !important; color: #fff !important; box-shadow: 0 0 15px #ff0055 !important; }
+
+/* Table Styling */
+thead tr { background: rgba(0,0,0,0.2) !important; }
+th, td { border-bottom: 1px solid rgba(255,255,255,0.1) !important; }
+tbody tr:hover { background: rgba(0, 255, 255, 0.1) !important; }
+
+/* Inputs */
+.search-box, .filter-select, .form-input {
+  background: rgba(0,0,0,0.2) !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-main) !important;
+  border-radius: 8px !important;
+}
+.search-box:focus-within, .form-input:focus {
+  border-color: #00ffff !important;
+  box-shadow: 0 0 10px rgba(0,255,255,0.5) !important;
+}
+
+/* Badges */
+.badge { text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 0 8px currentColor !important; }
+
+/* Theme Toggle Button */
+.theme-toggle-btn {
+  background: rgba(0,0,0,0.3);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  border-radius: 50%;
+  width: 40px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  margin-right: 15px;
+  transition: all 0.3s;
+}
+.theme-toggle-btn:hover { box-shadow: var(--neon-glow); transform: rotate(180deg); }
+
+/* Remove old index.html overrides */
+.main-wrap, .login-screen { z-index: 1; }
+.login-screen { background: transparent !important; }
+.entry-splash { background: var(--bg-app) !important; }
