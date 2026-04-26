@@ -2345,6 +2345,11 @@ tbody tr:hover td {
         <span>Quản lý bài đăng</span>
         <span class="nav-badge" id="badgePosts"></span>
       </button>
+      <button class="nav-item" data-page="featured">
+        <i class="fas fa-star"></i>
+        <span>Duyệt nổi bật</span>
+        <span class="nav-badge" id="badgeFeatured"></span>
+      </button>
 
       <div class="nav-section-label">Hệ thống</div>
 
@@ -2355,6 +2360,14 @@ tbody tr:hover td {
       <button class="nav-item" data-page="appointments">
         <i class="fas fa-calendar-alt"></i>
         <span>Lịch hẹn</span>
+      </button>
+      <button class="nav-item" data-page="payments">
+        <i class="fas fa-receipt"></i>
+        <span>Thanh toán/gói</span>
+      </button>
+      <button class="nav-item" data-page="reviews">
+        <i class="fas fa-comments"></i>
+        <span>Đánh giá</span>
       </button>
       <button class="nav-item" data-page="support">
         <i class="fas fa-headset"></i>
@@ -2476,6 +2489,70 @@ tbody tr:hover td {
             <div id="dashRecentUsers"><div class="empty-state"><i class="fas fa-users"></i>Đang tải...</div></div>
           </div>
         </div>
+      </div>
+
+      <!-- FEATURED REQUESTS -->
+      <div class="page" id="pageFeatured">
+        <div class="page-toolbar">
+          <div class="tab-group" id="featuredTabGroup">
+            <button class="tab-btn active" data-filter="paid_waiting_admin">Chờ duyệt</button>
+            <button class="tab-btn" data-filter="approved">Đã duyệt</button>
+            <button class="tab-btn" data-filter="rejected">Từ chối</button>
+            <button class="tab-btn" data-filter="all">Tất cả</button>
+          </div>
+        </div>
+        <div class="result-info" id="featuredResultInfo"></div>
+        <div class="card">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Bài đăng</th><th>Gói</th><th>Thanh toán</th><th>Trạng thái</th><th style="text-align:right">Thao tác</th></tr></thead>
+              <tbody id="featuredTableBody"><tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pagination" id="featuredPagination"></div>
+      </div>
+
+      <!-- PAYMENTS -->
+      <div class="page" id="pagePayments">
+        <div class="page-toolbar">
+          <div class="tab-group" id="paymentsTabGroup">
+            <button class="tab-btn active" data-filter="all">Tất cả</button>
+            <button class="tab-btn" data-filter="slot">Mua lượt đăng</button>
+            <button class="tab-btn" data-filter="featured">Đẩy nổi bật</button>
+          </div>
+        </div>
+        <div class="result-info" id="paymentsResultInfo"></div>
+        <div class="card">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Dịch vụ</th><th>Người dùng</th><th>Số tiền</th><th>Thời gian</th><th>Trạng thái</th></tr></thead>
+              <tbody id="paymentsTableBody"><tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pagination" id="paymentsPagination"></div>
+      </div>
+
+      <!-- REVIEWS -->
+      <div class="page" id="pageReviews">
+        <div class="page-toolbar">
+          <div class="tab-group" id="reviewsTabGroup">
+            <button class="tab-btn active" data-filter="approved">Đang hiển thị</button>
+            <button class="tab-btn" data-filter="hidden">Đã ẩn</button>
+            <button class="tab-btn" data-filter="all">Tất cả</button>
+          </div>
+        </div>
+        <div class="result-info" id="reviewsResultInfo"></div>
+        <div class="card">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Đánh giá</th><th>Phòng</th><th>Người đánh giá</th><th>Ngày tạo</th><th style="text-align:right">Thao tác</th></tr></thead>
+              <tbody id="reviewsTableBody"><tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pagination" id="reviewsPagination"></div>
       </div>
 
       <!-- SUPPORT -->

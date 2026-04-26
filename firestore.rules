@@ -81,22 +81,33 @@ service cloud.firestore {
         && request.auth.uid == userId
         && request.resource.data.uid == resource.data.uid
         && request.resource.data.role in ["user", "pending"]
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
-          "fullName",
-          "email",
-          "phone",
-          "address",
-          "birthday",
-          "gender",
-          "occupation",
-          "avatarUrl",
-          "fcmToken",
-          "lastLoginAt",
-          "isOnline",
-          "lastSeen",
-          "hasAcceptedRules",
-          "role"
-        ])
+        && (
+          request.resource.data.diff(resource.data).changedKeys().hasOnly([
+            "fullName",
+            "email",
+            "phone",
+            "address",
+            "birthday",
+            "gender",
+            "occupation",
+            "avatarUrl",
+            "fcmToken",
+            "lastLoginAt",
+            "isOnline",
+            "lastSeen",
+            "hasAcceptedRules",
+            "role"
+          ])
+          || (
+            request.resource.data.diff(resource.data).changedKeys().hasOnly([
+              "purchasedSlots",
+              "lastSlotConsumedAt"
+            ])
+            && resource.data.purchasedSlots is int
+            && request.resource.data.purchasedSlots == resource.data.purchasedSlots - 1
+            && request.resource.data.lastSlotConsumedAt is int
+          )
+        )
       );
 
       allow delete: if isAdmin();
@@ -204,6 +215,101 @@ service cloud.firestore {
                               isAdmin()
                               || resource.data.userId == request.auth.uid
                             );
+    }
+
+    // SLOT UPGRADE PAYMENTS
+    match /slot_upgrade_requests/{requestId} {
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.uid == request.auth.uid);
+
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.status == "waiting_for_payment"
+                    && request.resource.data.amount is int
+                    && request.resource.data.slots is int
+                    && request.resource.data.createdAt is int
+                    && request.resource.data.expiresAt is int;
+
+      allow update: if isAdmin()
+                    || (
+                      isSignedIn()
+                      && resource.data.uid == request.auth.uid
+                      && resource.data.status == "waiting_for_payment"
+                      && request.resource.data.uid == resource.data.uid
+                      && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+                        "status",
+                        "updatedAt"
+                      ])
+                      && request.resource.data.status == "cancelled"
+                    );
+
+      allow delete: if isAdmin();
+    }
+
+    // FEATURED UPGRADE PAYMENTS
+    match /featured_upgrade_requests/{requestId} {
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.uid == request.auth.uid);
+
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.status == "waiting_for_payment"
+                    && request.resource.data.approvalStatus == "pending_payment"
+                    && request.resource.data.roomId is string
+                    && request.resource.data.amount is int
+                    && request.resource.data.days is int
+                    && request.resource.data.createdAt is int
+                    && request.resource.data.expiresAt is int;
+
+      allow update: if isAdmin()
+                    || (
+                      isSignedIn()
+                      && resource.data.uid == request.auth.uid
+                      && resource.data.status == "waiting_for_payment"
+                      && request.resource.data.uid == resource.data.uid
+                      && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+                        "status",
+                        "approvalStatus",
+                        "updatedAt"
+                      ])
+                      && request.resource.data.status == "cancelled"
+                      && request.resource.data.approvalStatus == "cancelled"
+                    );
+
+      allow delete: if isAdmin();
+    }
+
+    // REVIEWS
+    match /reviews/{reviewId} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.landlordId is string
+                    && request.resource.data.landlordId != request.auth.uid
+                    && request.resource.data.roomId is string
+                    && request.resource.data.rating is int
+                    && request.resource.data.rating >= 1
+                    && request.resource.data.rating <= 5
+                    && request.resource.data.comment is string
+                    && request.resource.data.status == "approved";
+
+      allow update: if isAdmin()
+                    || (
+                      isSignedIn()
+                      && resource.data.userId == request.auth.uid
+                      && request.resource.data.userId == resource.data.userId
+                      && request.resource.data.landlordId == resource.data.landlordId
+                      && request.resource.data.roomId == resource.data.roomId
+                      && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+                        "rating",
+                        "comment",
+                        "updatedAt"
+                      ])
+                    );
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && resource.data.userId == request.auth.uid);
     }
 
     // NOTIFICATIONS

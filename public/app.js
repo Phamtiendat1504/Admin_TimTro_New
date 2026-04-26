@@ -39,6 +39,16 @@ const fmtDateTime = ts => {
   const ms = toEpochMs(ts);
   return ms ? new Date(ms).toLocaleString('vi-VN') : 'N/A';
 };
+const statusText = status => ({
+  waiting_for_payment: 'Chờ thanh toán',
+  paid: 'Đã thanh toán',
+  paid_waiting_admin: 'Chờ admin duyệt',
+  approved: 'Đã duyệt',
+  rejected: 'Từ chối',
+  expired: 'Hết hạn',
+  cancelled: 'Đã hủy',
+  failed: 'Lỗi'
+}[status] || status || 'N/A');
 const escapeHtml = value => String(value ?? '')
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
@@ -374,6 +384,9 @@ const pageConfig = {
   users:          { title: 'Quản lý người dùng', bread: 'Người dùng',       load: () => loadUsers('all') },
   appointments:  { title: 'Lịch hẹn xem phòng', bread: 'Lịch hẹn',        load: () => loadAppointments('all') },
   support:       { title: 'Hỗ trợ người dùng',  bread: 'Hỗ trợ',          load: () => loadSupportTickets('new') },
+  featured:      { title: 'Duyệt bài nổi bật',  bread: 'Nổi bật',         load: () => loadFeaturedRequests('paid_waiting_admin') },
+  payments:      { title: 'Lịch sử thanh toán', bread: 'Thanh toán',       load: () => loadPayments('all') },
+  reviews:       { title: 'Quản lý đánh giá',   bread: 'Đánh giá',         load: () => loadReviews('approved') },
   broadcast:      { title: 'Thông báo hệ thống', bread: 'Gửi thông báo',    load: () => {} },
   cleanup:        { title: 'Dọn dẹp tài khoản',  bread: 'Dọn dẹp',          load: () => { document.getElementById('cleanupResultArea').style.display = 'none'; } },
 };
@@ -440,6 +453,18 @@ bindTabs('supportTabGroup', filter => {
   state.support.page = 1;
   loadSupportTickets(filter);
 });
+bindTabs('featuredTabGroup', filter => {
+  state.featured.page = 1;
+  loadFeaturedRequests(filter);
+});
+bindTabs('paymentsTabGroup', filter => {
+  state.payments.page = 1;
+  loadPayments(filter);
+});
+bindTabs('reviewsTabGroup', filter => {
+  state.reviews.page = 1;
+  loadReviews(filter);
+});
 
 // ════════════════════════════════════════
 // REAL-TIME DASHBOARD LISTENERS & AUTO-UNLOCK SWEEP
@@ -503,6 +528,15 @@ function startRealtimeListeners() {
       setBadge('badgeSupport', unread);
       if (document.getElementById('pageSupport')?.classList.contains('active')) {
         loadSupportTickets(getActiveTab('supportTabGroup'));
+      }
+    })
+  );
+  activeListeners.push(
+    db.collection('featured_upgrade_requests').onSnapshot(snap => {
+      const pending = snap.docs.filter(d => d.data().status === 'paid_waiting_admin').length;
+      setBadge('badgeFeatured', pending);
+      if (document.getElementById('pageFeatured')?.classList.contains('active')) {
+        loadFeaturedRequests(getActiveTab('featuredTabGroup'));
       }
     })
   );
@@ -778,6 +812,9 @@ const state = {
   users: { docs: [], page: 1, sort: 'newest' },
   appt:  { docs: [], page: 1, sort: 'newest' },
   support: { docs: [], page: 1, sort: 'newest' },
+  featured: { docs: [], page: 1, sort: 'newest' },
+  payments: { docs: [], page: 1, sort: 'newest' },
+  reviews: { docs: [], page: 1, sort: 'newest' },
 };
 
 function sortDocs(docs, sort) {
@@ -821,6 +858,9 @@ function goPage(key, page) {
   if (key === 'users') renderUsers();
   if (key === 'appt')  renderAppt();
   if (key === 'support') renderSupportTickets();
+  if (key === 'featured') renderFeaturedRequests();
+  if (key === 'payments') renderPayments();
+  if (key === 'reviews') renderReviews();
 }
 
 // ════════════════════════════════════════
@@ -960,6 +1000,223 @@ function renderPosts() {
     </tr>`;
   }).join('');
   updatePostsSelectAllState(page);
+}
+
+async function loadFeaturedRequests(filter) {
+  const tbody = document.getElementById('featuredTableBody');
+  tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr>';
+  try {
+    let q = db.collection('featured_upgrade_requests');
+    if (filter !== 'all') q = q.where('status', '==', filter);
+    q = q.orderBy('createdAt', 'desc');
+    const snap = await q.get();
+    state.featured.docs = snap.docs;
+    state.featured.page = 1;
+    renderFeaturedRequests();
+  } catch (e) {
+    console.error(e);
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Lỗi tải yêu cầu nổi bật</div></td></tr>';
+  }
+}
+
+function renderFeaturedRequests() {
+  const tbody = document.getElementById('featuredTableBody');
+  const all = state.featured.docs;
+  if (!all.length) {
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Không có yêu cầu nổi bật</div></td></tr>';
+    renderResultInfo('featuredResultInfo', 1, 0);
+    document.getElementById('featuredPagination').innerHTML = '';
+    return;
+  }
+  renderResultInfo('featuredResultInfo', state.featured.page, all.length);
+  renderPagination('featuredPagination', 'featured', all.length);
+  const page = all.slice((state.featured.page-1)*PAGE_SIZE, state.featured.page*PAGE_SIZE);
+  tbody.innerHTML = page.map(doc => {
+    const d = doc.data();
+    const safeTitle = String(d.roomTitle || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<tr>
+      <td><div class="td-name">${escapeHtml(d.roomTitle || d.roomId || 'Bài đăng')}</div><div class="td-email">${escapeHtml(d.roomId || '')}</div></td>
+      <td><b>${escapeHtml(d.label || d.code || '')}</b><div class="td-email">${d.days || 0} ngày</div></td>
+      <td><b>${fmt(d.amount || 0)} đ</b><div class="td-email">${escapeHtml(d.transferNote || '')}</div></td>
+      <td><span class="badge ${d.status === 'approved' ? 'badge-approved' : d.status === 'rejected' ? 'badge-rejected' : 'badge-pending'}">${statusText(d.status)}</span></td>
+      <td style="text-align:right"><div class="list-actions">
+        ${d.status === 'paid_waiting_admin' ? `
+          <button class="btn btn-approve" onclick="approveFeaturedRequest('${doc.id}','${d.uid}','${d.roomId}','${safeTitle}')">Duyệt</button>
+          <button class="btn btn-reject" onclick="rejectFeaturedRequest('${doc.id}','${d.uid}','${d.roomId}','${safeTitle}')">Từ chối</button>
+        ` : ''}
+        <button class="btn btn-view" onclick="viewPost('${d.roomId}')">Xem bài</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+async function approveFeaturedRequest(requestId, uid, roomId, title) {
+  const ok = await showConfirm('Duyệt nổi bật', 'Xác nhận đưa bài này lên mục Phòng nổi bật?', 'success');
+  if (!ok) return;
+  try {
+    const reqRef = db.collection('featured_upgrade_requests').doc(requestId);
+    const reqSnap = await reqRef.get();
+    const req = reqSnap.data() || {};
+    const now = Date.now();
+    const days = Number(req.days || 0);
+    const featuredUntil = now + Math.max(days, 1) * 24 * 60 * 60 * 1000;
+    await db.runTransaction(async tx => {
+      tx.set(reqRef, {
+        status: 'approved',
+        approvalStatus: 'approved',
+        approvedAt: now,
+        updatedAt: now,
+        featuredStartAt: now,
+        featuredUntil
+      }, { merge: true });
+      tx.set(db.collection('rooms').doc(roomId), {
+        isFeatured: true,
+        featuredStartAt: now,
+        featuredUntil,
+        featuredPackageCode: req.code || '',
+        featuredPaymentId: requestId,
+        featuredRequestStatus: 'approved'
+      }, { merge: true });
+    });
+    await sendNotification(uid, 'Bài đăng đã lên nổi bật', `Bài đăng "${title || 'của bạn'}" đã được admin duyệt nổi bật.`, 'featured_approved');
+    showToast('success', 'Thành công', 'Đã duyệt bài nổi bật');
+    loadFeaturedRequests(getActiveTab('featuredTabGroup'));
+  } catch (e) { showToast('error', 'Lỗi', e.message); }
+}
+
+async function rejectFeaturedRequest(requestId, uid, roomId, title) {
+  const reason = await showPrompt('Từ chối nổi bật', 'Nhập lý do từ chối:', 'Lý do...');
+  if (reason === null) return;
+  if (!reason || reason.length < 5) { showToast('warning', 'Cảnh báo', 'Lý do phải ít nhất 5 ký tự'); return; }
+  try {
+    const now = Date.now();
+    await db.runTransaction(async tx => {
+      tx.set(db.collection('featured_upgrade_requests').doc(requestId), {
+        status: 'rejected',
+        approvalStatus: 'rejected',
+        rejectReason: reason,
+        rejectedAt: now,
+        updatedAt: now
+      }, { merge: true });
+      tx.set(db.collection('rooms').doc(roomId), { featuredRequestStatus: 'rejected' }, { merge: true });
+    });
+    await sendNotification(uid, 'Yêu cầu nổi bật bị từ chối', `Bài "${title || 'của bạn'}" bị từ chối nổi bật. Lý do: ${reason}`, 'featured_rejected');
+    showToast('warning', 'Đã từ chối', 'Yêu cầu nổi bật đã bị từ chối');
+    loadFeaturedRequests(getActiveTab('featuredTabGroup'));
+  } catch (e) { showToast('error', 'Lỗi', e.message); }
+}
+
+async function loadPayments(filter) {
+  const tbody = document.getElementById('paymentsTableBody');
+  tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr>';
+  try {
+    const tasks = [];
+    if (filter === 'all' || filter === 'slot') tasks.push(db.collection('slot_upgrade_requests').orderBy('createdAt', 'desc').limit(200).get());
+    if (filter === 'all' || filter === 'featured') tasks.push(db.collection('featured_upgrade_requests').orderBy('createdAt', 'desc').limit(200).get());
+    const snaps = await Promise.all(tasks);
+    const docs = [];
+    snaps.forEach(snap => snap.docs.forEach(doc => docs.push({ id: doc.id, type: doc.ref.parent.id === 'featured_upgrade_requests' ? 'featured' : 'slot', data: doc.data() })));
+    state.payments.docs = docs.sort((a,b) => (b.data.createdAt || 0) - (a.data.createdAt || 0));
+    state.payments.page = 1;
+    renderPayments();
+  } catch (e) {
+    console.error(e);
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Lỗi tải thanh toán</div></td></tr>';
+  }
+}
+
+function renderPayments() {
+  const tbody = document.getElementById('paymentsTableBody');
+  const all = state.payments.docs;
+  if (!all.length) {
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Không có giao dịch</div></td></tr>';
+    renderResultInfo('paymentsResultInfo', 1, 0);
+    document.getElementById('paymentsPagination').innerHTML = '';
+    return;
+  }
+  renderResultInfo('paymentsResultInfo', state.payments.page, all.length);
+  renderPagination('paymentsPagination', 'payments', all.length);
+  const page = all.slice((state.payments.page-1)*PAGE_SIZE, state.payments.page*PAGE_SIZE);
+  tbody.innerHTML = page.map(item => {
+    const d = item.data;
+    return `<tr>
+      <td><div class="td-name">${item.type === 'featured' ? 'Đẩy nổi bật' : 'Mua lượt đăng'}</div><div class="td-email">${escapeHtml(d.label || d.code || '')}</div></td>
+      <td><div class="td-email">${escapeHtml(d.uid || '')}</div>${d.roomTitle ? `<div class="td-email">${escapeHtml(d.roomTitle)}</div>` : ''}</td>
+      <td><b>${fmt(d.amount || 0)} đ</b><div class="td-email">${escapeHtml(d.transferNote || '')}</div></td>
+      <td>${fmtDateTime(d.paidAt || d.createdAt)}</td>
+      <td><span class="badge ${d.status === 'paid' || d.status === 'approved' ? 'badge-approved' : d.status === 'rejected' || d.status === 'expired' ? 'badge-rejected' : 'badge-pending'}">${statusText(d.status)}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadReviews(filter) {
+  const tbody = document.getElementById('reviewsTableBody');
+  tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr>';
+  try {
+    let q = db.collection('reviews');
+    if (filter !== 'all') q = q.where('status', '==', filter);
+    q = q.orderBy('createdAt', 'desc');
+    const snap = await q.get();
+    state.reviews.docs = snap.docs;
+    state.reviews.page = 1;
+    renderReviews();
+  } catch (e) {
+    console.error(e);
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Lỗi tải đánh giá</div></td></tr>';
+  }
+}
+
+function renderReviews() {
+  const tbody = document.getElementById('reviewsTableBody');
+  const all = state.reviews.docs;
+  if (!all.length) {
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Không có đánh giá</div></td></tr>';
+    renderResultInfo('reviewsResultInfo', 1, 0);
+    document.getElementById('reviewsPagination').innerHTML = '';
+    return;
+  }
+  renderResultInfo('reviewsResultInfo', state.reviews.page, all.length);
+  renderPagination('reviewsPagination', 'reviews', all.length);
+  const page = all.slice((state.reviews.page-1)*PAGE_SIZE, state.reviews.page*PAGE_SIZE);
+  tbody.innerHTML = page.map(doc => {
+    const d = doc.data();
+    return `<tr>
+      <td><div class="td-name">${'★'.repeat(Number(d.rating || 0))}</div><div class="td-email" style="max-width:360px">${escapeHtml(d.comment || '')}</div></td>
+      <td><div class="td-name">${escapeHtml(d.roomTitle || d.roomId || '')}</div><div class="td-email">Chủ trọ: ${escapeHtml(d.landlordId || '')}</div></td>
+      <td><div class="td-name">${escapeHtml(d.userName || 'Người dùng')}</div><div class="td-email">${escapeHtml(d.userId || '')}</div></td>
+      <td>${fmtDateTime(d.createdAt)}</td>
+      <td style="text-align:right"><div class="list-actions">
+        ${d.status === 'approved' ? `<button class="btn btn-reject" onclick="hideReview('${doc.id}')">Ẩn</button>` : `<button class="btn btn-approve" onclick="showReview('${doc.id}')">Hiện lại</button>`}
+        <button class="btn btn-delete" onclick="deleteReview('${doc.id}')"><i class="fas fa-trash"></i></button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+async function hideReview(id) {
+  try {
+    await db.collection('reviews').doc(id).set({ status: 'hidden', updatedAt: Date.now() }, { merge: true });
+    showToast('success', 'Đã ẩn', 'Đánh giá đã được ẩn');
+    loadReviews(getActiveTab('reviewsTabGroup'));
+  } catch (e) { showToast('error', 'Lỗi', e.message); }
+}
+
+async function showReview(id) {
+  try {
+    await db.collection('reviews').doc(id).set({ status: 'approved', updatedAt: Date.now() }, { merge: true });
+    showToast('success', 'Đã hiện lại', 'Đánh giá đã được hiển thị');
+    loadReviews(getActiveTab('reviewsTabGroup'));
+  } catch (e) { showToast('error', 'Lỗi', e.message); }
+}
+
+async function deleteReview(id) {
+  const ok = await showConfirm('Xóa đánh giá', 'Bạn có chắc chắn muốn xóa đánh giá này?', 'danger');
+  if (!ok) return;
+  try {
+    await db.collection('reviews').doc(id).delete();
+    showToast('success', 'Đã xóa', 'Đánh giá đã bị xóa');
+    loadReviews(getActiveTab('reviewsTabGroup'));
+  } catch (e) { showToast('error', 'Lỗi', e.message); }
 }
 
 let postsSearchKeyword = '';
