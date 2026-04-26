@@ -1,0 +1,79 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc(uid) {
+      return firestore.get(/databases/(default)/documents/users/$(uid));
+    }
+
+    function userExists(uid) {
+      return firestore.exists(/databases/(default)/documents/users/$(uid));
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && userExists(request.auth.uid)
+        && userDoc(request.auth.uid).data.role == "admin";
+    }
+
+    function isImageUpload(maxSize) {
+      return request.resource != null
+        && request.resource.size <= maxSize
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    function isDelete() {
+      return request.resource == null;
+    }
+
+    function supportTicketExists(ticketId) {
+      return firestore.exists(/databases/(default)/documents/support_tickets/$(ticketId));
+    }
+
+    function isSupportTicketOwner(ticketId) {
+      return isSignedIn()
+        && supportTicketExists(ticketId)
+        && firestore.get(/databases/(default)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid;
+    }
+
+    match /avatars/{userId}/{fileName=**} {
+      allow read: if true;
+      allow write: if isSignedIn()
+        && (isAdmin() || request.auth.uid == userId)
+        && (isDelete() || isImageUpload(5 * 1024 * 1024));
+    }
+
+    match /rooms/{roomId}/{fileName=**} {
+      allow read: if true;
+      allow write: if isSignedIn()
+        && (isAdmin() || isImageUpload(15 * 1024 * 1024));
+    }
+
+    match /verifications/{userId}/{fileName=**} {
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow write: if isSignedIn()
+        && (isAdmin() || request.auth.uid == userId)
+        && (isDelete() || isImageUpload(10 * 1024 * 1024));
+    }
+
+    match /chat_images/{chatId}/{fileName=**} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+        && (isDelete() || isImageUpload(15 * 1024 * 1024));
+    }
+
+    match /support_images/{ticketId}/{fileName=**} {
+      allow read: if isAdmin() || isSupportTicketOwner(ticketId);
+      allow write: if (isAdmin() || isSupportTicketOwner(ticketId))
+        && (isDelete() || isImageUpload(10 * 1024 * 1024));
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

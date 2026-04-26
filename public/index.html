@@ -566,6 +566,17 @@ tbody tr:hover td { background: #f8fafc; }
   box-shadow: 0 0 40px rgba(0,0,0,.5);
   animation: zoomIn .3s cubic-bezier(.34,1.56,.64,1);
 }
+.support-thread { max-height: 430px; overflow-y: auto; background: #f8fafc; border: 1px solid var(--border); border-radius: 16px; padding: 14px; }
+.support-msg { display: flex; margin-bottom: 12px; }
+.support-msg.admin { justify-content: flex-end; }
+.support-bubble { max-width: 76%; border-radius: 16px; padding: 10px 12px; background: #fff; border: 1px solid #e2e8f0; }
+.support-msg.admin .support-bubble { background: #e0f2fe; border-color: #bae6fd; }
+.support-msg-meta { font-size: 11px; color: #64748b; font-weight: 700; margin-bottom: 4px; }
+.support-msg-text { font-size: 13px; color: var(--text-primary); line-height: 1.5; white-space: pre-wrap; }
+.support-msg-img { width: 180px; max-width: 100%; border-radius: 12px; margin-top: 8px; cursor: pointer; border: 1px solid #e2e8f0; }
+.support-reply-row { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; }
+.support-reply-row textarea { min-height: 90px; flex: 1; resize: vertical; }
+.support-file-note { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
 @keyframes zoomIn { from { transform: scale(.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 
 /* ── CONFIRM ── */
@@ -2345,6 +2356,11 @@ tbody tr:hover td {
         <i class="fas fa-calendar-alt"></i>
         <span>Lịch hẹn</span>
       </button>
+      <button class="nav-item" data-page="support">
+        <i class="fas fa-headset"></i>
+        <span>Hỗ trợ người dùng</span>
+        <span class="nav-badge" id="badgeSupport"></span>
+      </button>
 
       <div class="nav-section-label">Công cụ Admin</div>
       <button class="nav-item" data-page="broadcast">
@@ -2460,6 +2476,29 @@ tbody tr:hover td {
             <div id="dashRecentUsers"><div class="empty-state"><i class="fas fa-users"></i>Đang tải...</div></div>
           </div>
         </div>
+      </div>
+
+      <!-- SUPPORT -->
+      <div class="page" id="pageSupport">
+        <div class="page-toolbar">
+          <div class="tab-group" id="supportTabGroup">
+            <button class="tab-btn active" data-filter="new">Mới</button>
+            <button class="tab-btn" data-filter="in_progress">Đang xử lý</button>
+            <button class="tab-btn" data-filter="resolved">Đã xử lý</button>
+            <button class="tab-btn" data-filter="closed">Đã đóng</button>
+            <button class="tab-btn" data-filter="all">Tất cả</button>
+          </div>
+        </div>
+        <div class="result-info" id="supportResultInfo"></div>
+        <div class="card">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Người gửi</th><th>Loại vấn đề</th><th>Tiêu đề</th><th>Tin cuối</th><th>Cập nhật</th><th>Trạng thái</th><th style="text-align:right">Thao tác</th></tr></thead>
+              <tbody id="supportTableBody"><tr><td colspan="7"><div class="empty-state">Đang tải...</div></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pagination" id="supportPagination"></div>
       </div>
 
       <!-- VERIFICATIONS -->
