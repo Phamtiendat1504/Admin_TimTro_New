@@ -275,6 +275,7 @@ service cloud.firestore {
                       && request.resource.data.diff(resource.data).changedKeys().hasOnly([
                         "status",
                         "approvalStatus",
+                        "cancelledAt",
                         "updatedAt"
                       ])
                       && request.resource.data.status == "cancelled"
