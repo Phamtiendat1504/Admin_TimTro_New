@@ -417,6 +417,23 @@ service cloud.firestore {
         allow delete: if isAdmin();
       }
     }
+    // CCCD REGISTRY
+    match /cccd_registry/{cccdNumber} {
+      allow read: if isSignedIn();
+ 
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.cccdNumber == cccdNumber
+                    && request.resource.data.createdAt is int
+                    && request.resource.data.updatedAt is int;
+ 
+      allow update: if isSignedIn()
+                    && resource.data.uid == request.auth.uid
+                    && request.resource.data.uid == resource.data.uid
+                    && request.resource.data.cccdNumber == resource.data.cccdNumber;
+ 
+      allow delete: if isAdmin();
+    }
 
     // Broadcast queue
     match /system_notifications/{docId} {
