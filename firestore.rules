@@ -51,6 +51,17 @@ service cloud.firestore {
         && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
     }
 
+    function isSupportTicketOwner(ticketId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/support_tickets/$(ticketId))
+        && get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid;
+    }
+
+    function isSupportTicketOwnerAfter(ticketId) {
+      return isSignedIn()
+        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid;
+    }
+
     // USERS
     match /users/{userId} {
       allow read: if true;
@@ -235,6 +246,63 @@ service cloud.firestore {
                       && request.auth.uid == request.resource.data.senderId;
 
         allow update, delete: if isChatParticipant(chatId);
+      }
+    }
+
+    // SUPPORT TICKETS
+    match /support_tickets/{ticketId} {
+      allow read: if isAdmin()
+                  || (
+                    isSignedIn()
+                    && resource.data.userId == request.auth.uid
+                  );
+
+      allow create: if isSignedIn()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.status == "new"
+                    && request.resource.data.priority in ["normal", "high"]
+                    && request.resource.data.unreadForAdmin == true
+                    && request.resource.data.unreadForUser == false;
+
+      allow update: if isAdmin()
+                    || (
+                      isSignedIn()
+                      && resource.data.userId == request.auth.uid
+                      && request.resource.data.userId == resource.data.userId
+                      && request.resource.data.createdAt == resource.data.createdAt
+                      && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+                        "updatedAt",
+                        "lastMessage",
+                        "lastSenderRole",
+                        "status",
+                        "unreadForAdmin",
+                        "unreadForUser"
+                      ])
+                      && request.resource.data.status in ["new", "in_progress", "resolved", "closed"]
+                    );
+
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        allow read: if isAdmin() || isSupportTicketOwner(ticketId);
+
+        allow create: if (
+                        (isSupportTicketOwner(ticketId) || isSupportTicketOwnerAfter(ticketId))
+                        && request.resource.data.senderId == request.auth.uid
+                        && request.resource.data.senderRole == "user"
+                      )
+                      || (
+                        isAdmin()
+                        && request.resource.data.senderRole == "admin"
+                      );
+
+        allow update: if isAdmin()
+                      || (
+                        isSupportTicketOwner(ticketId)
+                        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["seenByUser"])
+                      );
+
+        allow delete: if isAdmin();
       }
     }
 

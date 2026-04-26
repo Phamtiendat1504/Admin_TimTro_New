@@ -229,8 +229,8 @@ window.showFullscreenImage = function(url) {
 // ════════════════════════════════════════
 // NOTIFICATION – SEND & ADMIN BELL
 // ════════════════════════════════════════
-function sendNotification(userId, title, message, type) {
-  return db.collection('notifications').add({ userId, title, message, type, seen: false, isRead: false, createdAt: Date.now() })
+function sendNotification(userId, title, message, type, extra = {}) {
+  return db.collection('notifications').add({ ...extra, userId, title, message, type, seen: false, isRead: false, createdAt: Date.now() })
     .catch(e => console.warn('Notification failed:', e));
 }
 
@@ -373,6 +373,7 @@ const pageConfig = {
   posts:          { title: 'Quản lý bài đăng',  bread: 'Bài đăng',          load: () => loadPosts('pending') },
   users:          { title: 'Quản lý người dùng', bread: 'Người dùng',       load: () => loadUsers('all') },
   appointments:  { title: 'Lịch hẹn xem phòng', bread: 'Lịch hẹn',        load: () => loadAppointments('all') },
+  support:       { title: 'Hỗ trợ người dùng',  bread: 'Hỗ trợ',          load: () => loadSupportTickets('new') },
   broadcast:      { title: 'Thông báo hệ thống', bread: 'Gửi thông báo',    load: () => {} },
   cleanup:        { title: 'Dọn dẹp tài khoản',  bread: 'Dọn dẹp',          load: () => { document.getElementById('cleanupResultArea').style.display = 'none'; } },
 };
@@ -435,6 +436,10 @@ bindTabs('apptTabGroup',   filter => {
   selectedAppointmentIds.clear();
   loadAppointments(filter);
 });
+bindTabs('supportTabGroup', filter => {
+  state.support.page = 1;
+  loadSupportTickets(filter);
+});
 
 // ════════════════════════════════════════
 // REAL-TIME DASHBOARD LISTENERS & AUTO-UNLOCK SWEEP
@@ -490,6 +495,15 @@ function startRealtimeListeners() {
       const pendingLike = snap.docs.filter(doc => shouldShowInAdminVerificationQueue(doc.data()));
       document.getElementById('statVerify').textContent = pendingLike.length;
       setBadge('badgeVerify', pendingLike.length);
+    })
+  );
+  activeListeners.push(
+    db.collection('support_tickets').onSnapshot(snap => {
+      const unread = snap.docs.filter(d => d.data().unreadForAdmin === true).length;
+      setBadge('badgeSupport', unread);
+      if (document.getElementById('pageSupport')?.classList.contains('active')) {
+        loadSupportTickets(getActiveTab('supportTabGroup'));
+      }
     })
   );
 }
@@ -763,6 +777,7 @@ const state = {
   posts: { docs: [], page: 1, sort: 'newest' },
   users: { docs: [], page: 1, sort: 'newest' },
   appt:  { docs: [], page: 1, sort: 'newest' },
+  support: { docs: [], page: 1, sort: 'newest' },
 };
 
 function sortDocs(docs, sort) {
@@ -805,6 +820,7 @@ function goPage(key, page) {
   if (key === 'posts') renderPosts();
   if (key === 'users') renderUsers();
   if (key === 'appt')  renderAppt();
+  if (key === 'support') renderSupportTickets();
 }
 
 // ════════════════════════════════════════
@@ -2100,6 +2116,209 @@ async function deleteSelectedAppointments() {
     showToast('warning', 'Hoàn tất một phần', `Đã xóa ${deleted}/${ids.length} lịch hẹn. ${failed} lịch hẹn lỗi.`);
   }
   loadAppointments(getActiveTab('apptTabGroup'));
+}
+
+// ════════════════════════════════════════
+// SUPPORT TICKETS
+// ════════════════════════════════════════
+async function loadSupportTickets(filter = 'new') {
+  const tbody = document.getElementById('supportTableBody');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state">Đang tải...</div></td></tr>';
+  try {
+    let q = db.collection('support_tickets');
+    if (filter !== 'all') q = q.where('status', '==', filter);
+    const snap = await q.get();
+    state.support.docs = snap.docs.sort((a, b) => toEpochMs(b.data().updatedAt) - toEpochMs(a.data().updatedAt));
+    state.support.page = 1;
+    renderSupportTickets();
+  } catch (e) {
+    console.error(e);
+    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state">Lỗi tải yêu cầu hỗ trợ</div></td></tr>';
+  }
+}
+
+function supportStatusInfo(status) {
+  const map = {
+    new: { label: 'Mới', cls: 'badge-pending' },
+    in_progress: { label: 'Đang xử lý', cls: 'badge-landlord' },
+    resolved: { label: 'Đã xử lý', cls: 'badge-approved' },
+    closed: { label: 'Đã đóng', cls: 'badge-rejected' },
+  };
+  return map[status] || { label: status || 'N/A', cls: 'badge-pending' };
+}
+
+function renderSupportTickets() {
+  const tbody = document.getElementById('supportTableBody');
+  if (!tbody) return;
+  const all = state.support.docs || [];
+  const total = all.length;
+  renderResultInfo('supportResultInfo', state.support.page, total);
+  renderPagination('supportPagination', 'support', total);
+  if (total === 0) {
+    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><i class="fas fa-headset"></i>Không có yêu cầu hỗ trợ</div></td></tr>';
+    return;
+  }
+  const page = all.slice((state.support.page - 1) * PAGE_SIZE, state.support.page * PAGE_SIZE);
+  tbody.innerHTML = page.map(doc => {
+    const d = doc.data();
+    const s = supportStatusInfo(d.status);
+    const unread = d.unreadForAdmin === true ? '<span class="badge badge-rejected" style="margin-left:6px">Mới</span>' : '';
+    return `<tr data-created-at="${toEpochMs(d.updatedAt)}">
+      <td>
+        <div class="td-user">
+          <div class="td-avatar">${escapeHtml((d.userName || 'U').charAt(0).toUpperCase())}</div>
+          <div><div class="td-name">${escapeHtml(d.userName || 'Người dùng')}</div><div class="td-email">${escapeHtml(d.userEmail || d.userId || '')}</div></div>
+        </div>
+      </td>
+      <td>${escapeHtml(d.category || 'Khác')}</td>
+      <td><b>${escapeHtml(d.title || 'Yêu cầu hỗ trợ')}</b>${unread}</td>
+      <td>${escapeHtml(d.lastMessage || '')}</td>
+      <td>${fmtDateTime(d.updatedAt)}</td>
+      <td><span class="badge ${s.cls}">${s.label}</span></td>
+      <td style="text-align:right"><button class="btn btn-view" onclick="openSupportTicket('${doc.id}')">Xem</button></td>
+    </tr>`;
+  }).join('');
+}
+
+async function openSupportTicket(ticketId) {
+  try {
+    const doc = await db.collection('support_tickets').doc(ticketId).get();
+    if (!doc.exists) {
+      showToast('error', 'Lỗi', 'Yêu cầu hỗ trợ không tồn tại');
+      return;
+    }
+    await db.collection('support_tickets').doc(ticketId).update({ unreadForAdmin: false });
+    const d = doc.data();
+    const msgSnap = await db.collection('support_tickets').doc(ticketId)
+      .collection('messages').orderBy('createdAt', 'asc').get();
+    const messagesHtml = msgSnap.docs.map(m => renderSupportMessage(m.data())).join('') ||
+      '<div class="empty-state">Chưa có tin nhắn</div>';
+    const status = supportStatusInfo(d.status);
+    closeModal();
+    showModal(`
+      <div class="modal-title">Yêu cầu hỗ trợ</div>
+      <div class="detail-row"><div class="detail-label">Người gửi</div><div class="detail-value">${escapeHtml(d.userName || 'Người dùng')} &bull; ${escapeHtml(d.userEmail || '')}</div></div>
+      <div class="detail-row"><div class="detail-label">Loại vấn đề</div><div class="detail-value">${escapeHtml(d.category || 'Khác')}</div></div>
+      <div class="detail-row"><div class="detail-label">Tiêu đề</div><div class="detail-value">${escapeHtml(d.title || 'Yêu cầu hỗ trợ')}</div></div>
+      <div class="detail-row"><div class="detail-label">Trạng thái</div><div class="detail-value"><span class="badge ${status.cls}">${status.label}</span></div></div>
+      <div class="support-thread" id="supportThread">${messagesHtml}</div>
+      ${d.status === 'closed' ? '<div class="empty-state" style="padding:16px">Yêu cầu này đã đóng.</div>' : `
+        <div class="support-reply-row">
+          <textarea id="supportReplyText" class="form-input" placeholder="Nhập phản hồi cho người dùng..."></textarea>
+          <button class="btn btn-approve" onclick="sendSupportReply('${ticketId}')"><i class="fas fa-paper-plane"></i> Gửi</button>
+        </div>
+        <input type="file" id="supportReplyImage" accept="image/*" class="form-input" style="margin-top:10px">
+        <div class="support-file-note">Có thể đính kèm 1 ảnh minh họa cho phản hồi.</div>
+      `}
+      <div class="modal-actions">
+        <button class="btn btn-view" onclick="closeModal()">Đóng</button>
+        ${d.status !== 'resolved' && d.status !== 'closed' ? `<button class="btn btn-approve" onclick="updateSupportStatus('${ticketId}','resolved')">Đánh dấu đã xử lý</button>` : ''}
+        ${d.status !== 'closed' ? `<button class="btn btn-reject" onclick="updateSupportStatus('${ticketId}','closed')">Đóng ticket</button>` : ''}
+      </div>
+    `);
+    setTimeout(() => {
+      const thread = document.getElementById('supportThread');
+      if (thread) thread.scrollTop = thread.scrollHeight;
+    }, 80);
+  } catch (e) {
+    console.error(e);
+    showToast('error', 'Lỗi', e.message);
+  }
+}
+
+function renderSupportMessage(m) {
+  const isAdmin = m.senderRole === 'admin';
+  const name = isAdmin ? 'Admin' : 'Người dùng';
+  const safeImage = safeUrl(m.imageUrl || '');
+  return `<div class="support-msg ${isAdmin ? 'admin' : 'user'}">
+    <div class="support-bubble">
+      <div class="support-msg-meta">${name} &bull; ${fmtDateTime(m.createdAt)}</div>
+      ${m.text ? `<div class="support-msg-text">${escapeHtml(m.text)}</div>` : ''}
+      ${safeImage ? `<img src="${safeImage}" class="support-msg-img" onclick="showFullscreenImage('${safeForJsGlobal(safeImage)}')">` : ''}
+    </div>
+  </div>`;
+}
+
+async function sendSupportReply(ticketId) {
+  const textEl = document.getElementById('supportReplyText');
+  const fileEl = document.getElementById('supportReplyImage');
+  const text = textEl?.value.trim() || '';
+  const file = fileEl?.files?.[0] || null;
+  if (!text && !file) {
+    showToast('warning', 'Thiếu nội dung', 'Nhập nội dung hoặc chọn ảnh trước khi gửi.');
+    return;
+  }
+  try {
+    showToast('info', 'Đang gửi', 'Đang gửi phản hồi hỗ trợ...', 2500);
+    let imageUrl = '';
+    if (file) {
+      const fileName = `${Date.now()}_${Math.random().toString(36).slice(2)}_${file.name}`;
+      const ref = storage.ref(`support_images/${ticketId}/${fileName}`);
+      await ref.put(file);
+      imageUrl = await ref.getDownloadURL();
+    }
+    const admin = auth.currentUser;
+    const adminDoc = admin ? await db.collection('users').doc(admin.uid).get() : null;
+    const adminName = adminDoc?.data()?.fullName || admin?.email || 'Admin';
+    const now = Date.now();
+    const ticketRef = db.collection('support_tickets').doc(ticketId);
+    const ticketDoc = await ticketRef.get();
+    if (!ticketDoc.exists) throw new Error('Ticket không tồn tại');
+    const ticket = ticketDoc.data();
+    await ticketRef.collection('messages').add({
+      senderId: admin?.uid || 'admin',
+      senderRole: 'admin',
+      text,
+      imageUrl,
+      createdAt: now,
+      seenByUser: false,
+      seenByAdmin: true
+    });
+    const lastMessage = text || '[Hình ảnh]';
+    await ticketRef.update({
+      status: ticket.status === 'new' ? 'in_progress' : ticket.status,
+      updatedAt: now,
+      lastMessage,
+      lastSenderRole: 'admin',
+      adminId: admin?.uid || '',
+      adminName,
+      unreadForUser: true,
+      unreadForAdmin: false
+    });
+    await db.collection('notifications').add({
+      userId: ticket.userId,
+      title: 'Admin đã phản hồi hỗ trợ',
+      message: lastMessage,
+      type: 'support_reply',
+      ticketId,
+      ticketTitle: ticket.title || 'Yêu cầu hỗ trợ',
+      seen: false,
+      isRead: false,
+      createdAt: now
+    });
+    showToast('success', 'Thành công', 'Đã gửi phản hồi cho người dùng.');
+    openSupportTicket(ticketId);
+    loadSupportTickets(getActiveTab('supportTabGroup'));
+  } catch (e) {
+    console.error(e);
+    showToast('error', 'Lỗi', e.message);
+  }
+}
+
+async function updateSupportStatus(ticketId, status) {
+  try {
+    await db.collection('support_tickets').doc(ticketId).update({
+      status,
+      updatedAt: Date.now(),
+      unreadForAdmin: false
+    });
+    showToast('success', 'Đã cập nhật', 'Trạng thái yêu cầu hỗ trợ đã được cập nhật.');
+    openSupportTicket(ticketId);
+    loadSupportTickets(getActiveTab('supportTabGroup'));
+  } catch (e) {
+    showToast('error', 'Lỗi', e.message);
+  }
 }
 
 // ════════════════════════════════════════
