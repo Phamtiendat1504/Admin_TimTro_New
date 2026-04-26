@@ -49,6 +49,18 @@ const statusText = status => ({
   cancelled: 'Đã hủy',
   failed: 'Lỗi'
 }[status] || status || 'N/A');
+const paymentStatusText = (status, type = '') => (
+  type === 'featured' && status === 'paid'
+    ? 'Đã thanh toán, chờ admin duyệt'
+    : statusText(status)
+);
+const paymentStatusBadge = (status, type = '') => {
+  if (status === 'approved') return 'badge-approved';
+  if (status === 'paid') return type === 'featured' ? 'badge-pending' : 'badge-approved';
+  if (status === 'paid_waiting_admin') return 'badge-pending';
+  if (['rejected', 'expired', 'cancelled', 'failed'].includes(status)) return 'badge-rejected';
+  return 'badge-pending';
+};
 const escapeHtml = value => String(value ?? '')
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
@@ -533,10 +545,17 @@ function startRealtimeListeners() {
   );
   activeListeners.push(
     db.collection('featured_upgrade_requests').onSnapshot(snap => {
-      const pending = snap.docs.filter(d => d.data().status === 'paid_waiting_admin').length;
+      const pending = snap.docs.filter(d => ['paid', 'paid_waiting_admin'].includes(d.data().status)).length;
       setBadge('badgeFeatured', pending);
       if (document.getElementById('pageFeatured')?.classList.contains('active')) {
         loadFeaturedRequests(getActiveTab('featuredTabGroup'));
+      }
+    })
+  );
+  activeListeners.push(
+    db.collection('reviews').onSnapshot(() => {
+      if (document.getElementById('pageReviews')?.classList.contains('active')) {
+        loadReviews(getActiveTab('reviewsTabGroup'));
       }
     })
   );
@@ -1007,10 +1026,14 @@ async function loadFeaturedRequests(filter) {
   tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr>';
   try {
     let q = db.collection('featured_upgrade_requests');
-    if (filter !== 'all') q = q.where('status', '==', filter);
-    q = q.orderBy('createdAt', 'desc');
     const snap = await q.get();
-    state.featured.docs = snap.docs;
+    let docs = snap.docs;
+    if (filter === 'paid_waiting_admin') {
+      docs = docs.filter(doc => ['paid', 'paid_waiting_admin'].includes(doc.data().status));
+    } else if (filter !== 'all') {
+      docs = docs.filter(doc => doc.data().status === filter);
+    }
+    state.featured.docs = docs.sort((a, b) => toEpochMs(b.data().createdAt) - toEpochMs(a.data().createdAt));
     state.featured.page = 1;
     renderFeaturedRequests();
   } catch (e) {
@@ -1034,13 +1057,14 @@ function renderFeaturedRequests() {
   tbody.innerHTML = page.map(doc => {
     const d = doc.data();
     const safeTitle = String(d.roomTitle || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    const status = d.status || 'waiting_for_payment';
     return `<tr>
       <td><div class="td-name">${escapeHtml(d.roomTitle || d.roomId || 'Bài đăng')}</div><div class="td-email">${escapeHtml(d.roomId || '')}</div></td>
       <td><b>${escapeHtml(d.label || d.code || '')}</b><div class="td-email">${d.days || 0} ngày</div></td>
       <td><b>${fmt(d.amount || 0)} đ</b><div class="td-email">${escapeHtml(d.transferNote || '')}</div></td>
-      <td><span class="badge ${d.status === 'approved' ? 'badge-approved' : d.status === 'rejected' ? 'badge-rejected' : 'badge-pending'}">${statusText(d.status)}</span></td>
+      <td><span class="badge ${paymentStatusBadge(status, 'featured')}">${paymentStatusText(status, 'featured')}</span></td>
       <td style="text-align:right"><div class="list-actions">
-        ${d.status === 'paid_waiting_admin' ? `
+        ${['paid', 'paid_waiting_admin'].includes(status) ? `
           <button class="btn btn-approve" onclick="approveFeaturedRequest('${doc.id}','${d.uid}','${d.roomId}','${safeTitle}')">Duyệt</button>
           <button class="btn btn-reject" onclick="rejectFeaturedRequest('${doc.id}','${d.uid}','${d.roomId}','${safeTitle}')">Từ chối</button>
         ` : ''}
@@ -1075,7 +1099,9 @@ async function approveFeaturedRequest(requestId, uid, roomId, title) {
         featuredUntil,
         featuredPackageCode: req.code || '',
         featuredPaymentId: requestId,
-        featuredRequestStatus: 'approved'
+        featuredRequestId: requestId,
+        featuredRequestStatus: 'approved',
+        featuredRequestUpdatedAt: now
       }, { merge: true });
     });
     await sendNotification(uid, 'Bài đăng đã lên nổi bật', `Bài đăng "${title || 'của bạn'}" đã được admin duyệt nổi bật.`, 'featured_approved');
@@ -1098,7 +1124,11 @@ async function rejectFeaturedRequest(requestId, uid, roomId, title) {
         rejectedAt: now,
         updatedAt: now
       }, { merge: true });
-      tx.set(db.collection('rooms').doc(roomId), { featuredRequestStatus: 'rejected' }, { merge: true });
+      tx.set(db.collection('rooms').doc(roomId), {
+        featuredRequestStatus: 'rejected',
+        featuredRequestId: requestId,
+        featuredRequestUpdatedAt: now
+      }, { merge: true });
     });
     await sendNotification(uid, 'Yêu cầu nổi bật bị từ chối', `Bài "${title || 'của bạn'}" bị từ chối nổi bật. Lý do: ${reason}`, 'featured_rejected');
     showToast('warning', 'Đã từ chối', 'Yêu cầu nổi bật đã bị từ chối');
@@ -1139,12 +1169,13 @@ function renderPayments() {
   const page = all.slice((state.payments.page-1)*PAGE_SIZE, state.payments.page*PAGE_SIZE);
   tbody.innerHTML = page.map(item => {
     const d = item.data;
+    const status = d.status || 'waiting_for_payment';
     return `<tr>
       <td><div class="td-name">${item.type === 'featured' ? 'Đẩy nổi bật' : 'Mua lượt đăng'}</div><div class="td-email">${escapeHtml(d.label || d.code || '')}</div></td>
       <td><div class="td-email">${escapeHtml(d.uid || '')}</div>${d.roomTitle ? `<div class="td-email">${escapeHtml(d.roomTitle)}</div>` : ''}</td>
       <td><b>${fmt(d.amount || 0)} đ</b><div class="td-email">${escapeHtml(d.transferNote || '')}</div></td>
       <td>${fmtDateTime(d.paidAt || d.createdAt)}</td>
-      <td><span class="badge ${d.status === 'paid' || d.status === 'approved' ? 'badge-approved' : d.status === 'rejected' || d.status === 'expired' ? 'badge-rejected' : 'badge-pending'}">${statusText(d.status)}</span></td>
+      <td><span class="badge ${paymentStatusBadge(status, item.type)}">${paymentStatusText(status, item.type)}</span></td>
     </tr>`;
   }).join('');
 }
@@ -1180,17 +1211,45 @@ function renderReviews() {
   const page = all.slice((state.reviews.page-1)*PAGE_SIZE, state.reviews.page*PAGE_SIZE);
   tbody.innerHTML = page.map(doc => {
     const d = doc.data();
+    const status = d.status || 'approved';
     return `<tr>
-      <td><div class="td-name">${'★'.repeat(Number(d.rating || 0))}</div><div class="td-email" style="max-width:360px">${escapeHtml(d.comment || '')}</div></td>
+      <td><div class="td-name">${'★'.repeat(Number(d.rating || 0))}</div><div class="td-email" style="max-width:360px">${escapeHtml(d.comment || '')}</div><span class="badge ${status === 'approved' ? 'badge-approved' : 'badge-rejected'}">${status === 'approved' ? 'Đang hiển thị' : 'Đã ẩn'}</span></td>
       <td><div class="td-name">${escapeHtml(d.roomTitle || d.roomId || '')}</div><div class="td-email">Chủ trọ: ${escapeHtml(d.landlordId || '')}</div></td>
       <td><div class="td-name">${escapeHtml(d.userName || 'Người dùng')}</div><div class="td-email">${escapeHtml(d.userId || '')}</div></td>
       <td>${fmtDateTime(d.createdAt)}</td>
       <td style="text-align:right"><div class="list-actions">
-        ${d.status === 'approved' ? `<button class="btn btn-reject" onclick="hideReview('${doc.id}')">Ẩn</button>` : `<button class="btn btn-approve" onclick="showReview('${doc.id}')">Hiện lại</button>`}
+        <button class="btn btn-view" onclick="viewReview('${doc.id}')">Xem</button>
+        ${status === 'approved' ? `<button class="btn btn-reject" onclick="hideReview('${doc.id}')">Ẩn</button>` : `<button class="btn btn-approve" onclick="showReview('${doc.id}')">Hiện lại</button>`}
         <button class="btn btn-delete" onclick="deleteReview('${doc.id}')"><i class="fas fa-trash"></i></button>
       </div></td>
     </tr>`;
   }).join('');
+}
+
+async function viewReview(id) {
+  try {
+    const snap = await db.collection('reviews').doc(id).get();
+    if (!snap.exists) { showToast('error', 'Lỗi', 'Đánh giá không tồn tại'); return; }
+    const d = snap.data() || {};
+    const status = d.status || 'approved';
+    showModal(`
+      <div class="modal-title">Chi tiết đánh giá</div>
+      <div class="detail-row"><div class="detail-label">Điểm</div><div class="detail-value">${'★'.repeat(Number(d.rating || 0))}</div></div>
+      <div class="detail-row"><div class="detail-label">Nội dung</div><div class="detail-value">${escapeHtml(d.comment || '')}</div></div>
+      <div class="detail-row"><div class="detail-label">Phòng</div><div class="detail-value">${escapeHtml(d.roomTitle || d.roomId || 'N/A')}</div></div>
+      <div class="detail-row"><div class="detail-label">Người đánh giá</div><div class="detail-value">${escapeHtml(d.userName || 'Người dùng')}<br><span class="td-email">${escapeHtml(d.userId || '')}</span></div></div>
+      <div class="detail-row"><div class="detail-label">Chủ trọ</div><div class="detail-value">${escapeHtml(d.landlordId || '')}</div></div>
+      <div class="detail-row"><div class="detail-label">Trạng thái</div><div class="detail-value"><span class="badge ${status === 'approved' ? 'badge-approved' : 'badge-rejected'}">${status === 'approved' ? 'Đang hiển thị' : 'Đã ẩn'}</span></div></div>
+      <div class="detail-row"><div class="detail-label">Ngày tạo</div><div class="detail-value">${fmtDateTime(d.createdAt)}</div></div>
+      <div class="modal-actions">
+        <button class="btn btn-view" onclick="closeModal()">Đóng</button>
+        ${status === 'approved' ? `<button class="btn btn-reject" onclick="hideReview('${id}');closeModal()">Ẩn đánh giá</button>` : `<button class="btn btn-approve" onclick="showReview('${id}');closeModal()">Hiện lại</button>`}
+        <button class="btn btn-delete" onclick="deleteReview('${id}');closeModal()">Xóa</button>
+      </div>
+    `);
+  } catch (e) {
+    showToast('error', 'Lỗi', e.message);
+  }
 }
 
 async function hideReview(id) {
