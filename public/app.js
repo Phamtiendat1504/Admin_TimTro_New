@@ -230,7 +230,7 @@ window.showFullscreenImage = function(url) {
 // NOTIFICATION – SEND & ADMIN BELL
 // ════════════════════════════════════════
 function sendNotification(userId, title, message, type, extra = {}) {
-  return db.collection('notifications').add({ userId, title, message, type, ...extra, seen: false, isRead: false, createdAt: Date.now() })
+  return db.collection('notifications').add({ ...extra, userId, title, message, type, seen: false, isRead: false, createdAt: Date.now() })
     .catch(e => console.warn('Notification failed:', e));
 }
 

@@ -40,6 +40,16 @@ service firebase.storage {
         && firestore.get(/databases/(default)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid;
     }
 
+    function roomExists(roomId) {
+      return firestore.exists(/databases/(default)/documents/rooms/$(roomId));
+    }
+
+    function isRoomOwner(roomId) {
+      return isSignedIn()
+        && roomExists(roomId)
+        && firestore.get(/databases/(default)/documents/rooms/$(roomId)).data.userId == request.auth.uid;
+    }
+
     match /avatars/{userId}/{fileName=**} {
       allow read: if true;
       allow write: if isSignedIn()
@@ -50,7 +60,8 @@ service firebase.storage {
     match /rooms/{roomId}/{fileName=**} {
       allow read: if true;
       allow write: if isSignedIn()
-        && (isAdmin() || isImageUpload(15 * 1024 * 1024));
+        && (isAdmin() || isRoomOwner(roomId))
+        && (isDelete() || isImageUpload(15 * 1024 * 1024));
     }
 
     match /verifications/{userId}/{fileName=**} {
