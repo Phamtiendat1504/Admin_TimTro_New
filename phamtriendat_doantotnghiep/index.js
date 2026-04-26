@@ -945,6 +945,17 @@ exports.processPendingSlotUpgradePayments = onSchedule(
 
         const userSnap = await tx.get(userRef);
         const currentSlots = Number(userSnap.data()?.purchasedSlots || 0);
+        const expectedFreshAmount = Number(freshReq.amount || 0);
+        if (expectedFreshAmount <= 0 || matchedTx.amountIn !== expectedFreshAmount) {
+          tx.set(doc.ref, {
+            status: "failed",
+            failReason: "amount_mismatch",
+            updatedAt: now,
+            paidAmount: matchedTx.amountIn,
+            paidContent: matchedTx.rawContent,
+          }, { merge: true });
+          return;
+        }
 
         tx.set(doc.ref, {
           status: "paid",
@@ -972,6 +983,164 @@ exports.processPendingSlotUpgradePayments = onSchedule(
       });
     }
 
+    return null;
+  }
+);
+
+exports.processPendingFeaturedUpgradePayments = onSchedule(
+  { schedule: "every 1 minutes", timeZone: "Asia/Ho_Chi_Minh", secrets: [sepayApiToken] },
+  async () => {
+    const token = String(sepayApiToken.value() || "").trim();
+    if (!token) {
+      console.error("[processPendingFeaturedUpgradePayments] Missing SEPAY_API_TOKEN secret.");
+      return null;
+    }
+
+    const db = admin.firestore();
+    const now = Date.now();
+    const waitingSnap = await db.collection("featured_upgrade_requests")
+      .where("status", "==", "waiting_for_payment")
+      .limit(SLOT_UPGRADE_SCAN_LIMIT)
+      .get();
+
+    if (waitingSnap.empty) return null;
+
+    let transactions = [];
+    try {
+      transactions = await fetchSePayTransactions(token);
+    } catch (error) {
+      console.error("[processPendingFeaturedUpgradePayments] Cannot fetch SePay transactions:", error);
+      return null;
+    }
+
+    for (const doc of waitingSnap.docs) {
+      const data = doc.data() || {};
+      const createdAt = Number(data.createdAt || 0);
+      const expiresAt = Number(data.expiresAt || (createdAt > 0 ? createdAt + SLOT_UPGRADE_EXPIRE_MS : 0));
+      const expectedAmount = Number(data.amount || 0);
+      const expectedNote = normalizeSePayContent(data.transferNote);
+      const expectedRequestCode = extractRequestCode(data.transferNote);
+
+      if (!expectedNote || expectedAmount <= 0) continue;
+
+      if (expiresAt > 0 && now > expiresAt) {
+        await doc.ref.set({
+          status: "expired",
+          approvalStatus: "expired",
+          expiredAt: now,
+          updatedAt: now,
+        }, { merge: true });
+        continue;
+      }
+
+      const matchedTx = transactions.find((tx) => {
+        const txRequestCode = extractRequestCode(tx.rawContent || "");
+        if (expectedRequestCode && txRequestCode) return txRequestCode === expectedRequestCode;
+        if (expectedRequestCode && tx.content.includes(`req${expectedRequestCode.toLowerCase()}`)) return true;
+        if (tx.amountIn !== expectedAmount) return false;
+        return tx.content.includes(expectedNote);
+      });
+      if (!matchedTx) continue;
+
+      const uid = String(data.uid || "").trim();
+      const roomId = String(data.roomId || "").trim();
+      const days = Number(data.days || 0);
+      if (!uid || !roomId || days <= 0) {
+        await doc.ref.set({
+          status: "failed",
+          failReason: "invalid_request_payload",
+          updatedAt: now,
+        }, { merge: true });
+        continue;
+      }
+
+      const roomRef = db.collection("rooms").doc(roomId);
+      const notifRef = db.collection("notifications").doc();
+
+      await db.runTransaction(async (tx) => {
+        const freshReqSnap = await tx.get(doc.ref);
+        if (!freshReqSnap.exists) return;
+        const freshReq = freshReqSnap.data() || {};
+        if (String(freshReq.status || "") !== "waiting_for_payment") return;
+
+        const freshCreatedAt = Number(freshReq.createdAt || 0);
+        const freshExpiresAt = Number(freshReq.expiresAt || (freshCreatedAt > 0 ? freshCreatedAt + SLOT_UPGRADE_EXPIRE_MS : 0));
+        if (freshExpiresAt > 0 && now > freshExpiresAt) {
+          tx.set(doc.ref, {
+            status: "expired",
+            approvalStatus: "expired",
+            expiredAt: now,
+            updatedAt: now,
+          }, { merge: true });
+          return;
+        }
+
+        const expectedFreshAmount = Number(freshReq.amount || 0);
+        if (expectedFreshAmount <= 0 || matchedTx.amountIn !== expectedFreshAmount) {
+          tx.set(doc.ref, {
+            status: "failed",
+            failReason: "amount_mismatch",
+            updatedAt: now,
+            paidAmount: matchedTx.amountIn,
+            paidContent: matchedTx.rawContent,
+          }, { merge: true });
+          return;
+        }
+
+        tx.set(doc.ref, {
+          status: "paid_waiting_admin",
+          approvalStatus: "pending_admin",
+          paidAt: now,
+          updatedAt: now,
+          paymentProvider: "sepay",
+          providerTxId: matchedTx.txId,
+          paidAmount: matchedTx.amountIn,
+          paidContent: matchedTx.rawContent,
+        }, { merge: true });
+
+        tx.set(roomRef, {
+          featuredRequestId: doc.id,
+          featuredRequestStatus: "paid_waiting_admin",
+        }, { merge: true });
+
+        tx.set(notifRef, {
+          userId: uid,
+          title: "Đã thanh toán gói nổi bật",
+          message: "Yêu cầu đẩy bài nổi bật đã được ghi nhận và đang chờ admin duyệt.",
+          type: "featured_upgrade_paid",
+          seen: false,
+          isRead: false,
+          createdAt: now,
+        });
+      });
+    }
+
+    return null;
+  }
+);
+
+exports.autoDisableExpiredFeaturedRooms = onSchedule(
+  { schedule: "every 30 minutes", timeZone: "Asia/Ho_Chi_Minh" },
+  async () => {
+    const db = admin.firestore();
+    const now = Date.now();
+    const snap = await db.collection("rooms")
+      .where("isFeatured", "==", true)
+      .where("featuredUntil", "<=", now)
+      .limit(200)
+      .get();
+
+    if (snap.empty) return null;
+
+    const batch = db.batch();
+    snap.docs.forEach((doc) => {
+      batch.set(doc.ref, {
+        isFeatured: false,
+        featuredRequestStatus: "expired",
+        featuredExpiredAt: now,
+      }, { merge: true });
+    });
+    await batch.commit();
     return null;
   }
 );
