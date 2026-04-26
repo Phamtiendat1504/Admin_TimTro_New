@@ -224,6 +224,7 @@ service cloud.firestore {
 
       allow create: if isSignedIn()
                     && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.requestId == requestId
                     && request.resource.data.status == "waiting_for_payment"
                     && request.resource.data.amount is int
                     && request.resource.data.slots is int
@@ -236,8 +237,10 @@ service cloud.firestore {
                       && resource.data.uid == request.auth.uid
                       && resource.data.status == "waiting_for_payment"
                       && request.resource.data.uid == resource.data.uid
+                      && request.resource.data.requestId == resource.data.requestId
                       && request.resource.data.diff(resource.data).changedKeys().hasOnly([
                         "status",
+                        "cancelledAt",
                         "updatedAt"
                       ])
                       && request.resource.data.status == "cancelled"
@@ -253,6 +256,7 @@ service cloud.firestore {
 
       allow create: if isSignedIn()
                     && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.requestId == requestId
                     && request.resource.data.status == "waiting_for_payment"
                     && request.resource.data.approvalStatus == "pending_payment"
                     && request.resource.data.roomId is string
@@ -267,9 +271,11 @@ service cloud.firestore {
                       && resource.data.uid == request.auth.uid
                       && resource.data.status == "waiting_for_payment"
                       && request.resource.data.uid == resource.data.uid
+                      && request.resource.data.requestId == resource.data.requestId
                       && request.resource.data.diff(resource.data).changedKeys().hasOnly([
                         "status",
                         "approvalStatus",
+                        "cancelledAt",
                         "updatedAt"
                       ])
                       && request.resource.data.status == "cancelled"
