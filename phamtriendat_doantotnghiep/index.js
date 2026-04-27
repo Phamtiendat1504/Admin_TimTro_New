@@ -410,6 +410,7 @@ exports.autoReviewVerificationByCloudVision = onDocumentWritten("verifications/{
       autoCheckStatus: "failed_escalated",
       autoCheckReason: reason,
       autoFailCountToday: failCount,
+      manualApprovalUnlockImmediately: failCount >= AUTO_FAIL_THRESHOLD + 1,
     }, { merge: true });
 
     batch.set(userRef, {
