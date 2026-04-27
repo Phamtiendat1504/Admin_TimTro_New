@@ -1079,12 +1079,19 @@ async function approveFeaturedRequest(requestId, uid, roomId, title) {
   if (!ok) return;
   try {
     const reqRef = db.collection('featured_upgrade_requests').doc(requestId);
-    const reqSnap = await reqRef.get();
-    const req = reqSnap.data() || {};
-    const now = Date.now();
-    const days = Number(req.days || 0);
-    const featuredUntil = now + Math.max(days, 1) * 24 * 60 * 60 * 1000;
+    let freshRequest = null;
     await db.runTransaction(async tx => {
+      const freshSnap = await tx.get(reqRef);
+      if (!freshSnap.exists) throw new Error('Yêu cầu nổi bật không tồn tại.');
+      const req = freshSnap.data() || {};
+      if (req.status !== 'paid_waiting_admin') {
+        throw new Error('Yêu cầu này không còn ở trạng thái chờ duyệt.');
+      }
+      const now = Date.now();
+      const days = Number(req.days || 0);
+      const targetRoomId = String(req.roomId || roomId || '');
+      const featuredUntil = now + Math.max(days, 1) * 24 * 60 * 60 * 1000;
+      freshRequest = { ...req, featuredUntil, featuredStartAt: now, roomId: targetRoomId };
       tx.set(reqRef, {
         status: 'approved',
         approvalStatus: 'approved',
@@ -1093,7 +1100,7 @@ async function approveFeaturedRequest(requestId, uid, roomId, title) {
         featuredStartAt: now,
         featuredUntil
       }, { merge: true });
-      tx.set(db.collection('rooms').doc(roomId), {
+      tx.set(db.collection('rooms').doc(targetRoomId), {
         isFeatured: true,
         featuredStartAt: now,
         featuredUntil,
@@ -1104,7 +1111,7 @@ async function approveFeaturedRequest(requestId, uid, roomId, title) {
         featuredRequestUpdatedAt: now
       }, { merge: true });
     });
-    await sendNotification(uid, 'Bài đăng đã lên nổi bật', `Bài đăng "${title || 'của bạn'}" đã được admin duyệt nổi bật.`, 'featured_approved');
+    await sendNotification(freshRequest?.uid || uid, 'Bài đăng đã lên nổi bật', `Bài đăng "${title || freshRequest?.roomTitle || 'của bạn'}" đã được admin duyệt nổi bật.`, 'featured_approved');
     showToast('success', 'Thành công', 'Đã duyệt bài nổi bật');
     loadFeaturedRequests(getActiveTab('featuredTabGroup'));
   } catch (e) { showToast('error', 'Lỗi', e.message); }
@@ -1115,22 +1122,32 @@ async function rejectFeaturedRequest(requestId, uid, roomId, title) {
   if (reason === null) return;
   if (!reason || reason.length < 5) { showToast('warning', 'Cảnh báo', 'Lý do phải ít nhất 5 ký tự'); return; }
   try {
-    const now = Date.now();
+    const reqRef = db.collection('featured_upgrade_requests').doc(requestId);
+    let freshRequest = null;
     await db.runTransaction(async tx => {
-      tx.set(db.collection('featured_upgrade_requests').doc(requestId), {
+      const freshSnap = await tx.get(reqRef);
+      if (!freshSnap.exists) throw new Error('Yêu cầu nổi bật không tồn tại.');
+      const req = freshSnap.data() || {};
+      if (req.status !== 'paid_waiting_admin') {
+        throw new Error('Yêu cầu này không còn ở trạng thái chờ duyệt.');
+      }
+      const now = Date.now();
+      const targetRoomId = String(req.roomId || roomId || '');
+      freshRequest = { ...req, roomId: targetRoomId };
+      tx.set(reqRef, {
         status: 'rejected',
         approvalStatus: 'rejected',
         rejectReason: reason,
         rejectedAt: now,
         updatedAt: now
       }, { merge: true });
-      tx.set(db.collection('rooms').doc(roomId), {
+      tx.set(db.collection('rooms').doc(targetRoomId), {
         featuredRequestStatus: 'rejected',
         featuredRequestId: requestId,
         featuredRequestUpdatedAt: now
       }, { merge: true });
     });
-    await sendNotification(uid, 'Yêu cầu nổi bật bị từ chối', `Bài "${title || 'của bạn'}" bị từ chối nổi bật. Lý do: ${reason}`, 'featured_rejected');
+    await sendNotification(freshRequest?.uid || uid, 'Yêu cầu nổi bật bị từ chối', `Bài "${title || freshRequest?.roomTitle || 'của bạn'}" bị từ chối nổi bật. Lý do: ${reason}`, 'featured_rejected');
     showToast('warning', 'Đã từ chối', 'Yêu cầu nổi bật đã bị từ chối');
     loadFeaturedRequests(getActiveTab('featuredTabGroup'));
   } catch (e) { showToast('error', 'Lỗi', e.message); }
@@ -3133,7 +3150,7 @@ async function approveVerification(docId, userId) {
       || status === 'queued_manual'
       || Number(verificationData.autoFailCountToday || 0) >= 4;
 
-    const postingUnlockAt = escalated ? now + (24 * 60 * 60 * 1000) : 0;
+    const postingUnlockAt = 0;
 
     const batch = db.batch();
     batch.update(verificationRef, {
@@ -3145,7 +3162,7 @@ async function approveVerification(docId, userId) {
       escalatedToAdmin: escalated,
       escalationDeadlineAt: 0,
       rejectReason: '',
-      autoCheckStatus: escalated ? 'approved_by_admin_wait_24h' : 'approved_by_admin'
+      autoCheckStatus: escalated ? 'approved_by_admin_after_manual_review' : 'approved_by_admin'
     });
     batch.update(userRef, {
       isVerified: true,
@@ -3155,23 +3172,13 @@ async function approveVerification(docId, userId) {
     });
     await batch.commit();
 
-    if (postingUnlockAt > now) {
-      await sendNotification(
-        userId,
-        'Đã được duyệt xác minh',
-        'Tài khoản của bạn đã được admin duyệt. Quyền đăng bài sẽ được mở sau 24 giờ kể từ lúc duyệt.',
-        'verification_approved_wait_24h'
-      );
-      showToast('success', 'Thành công', 'Đã duyệt thành công. Tài khoản này sẽ mở quyền đăng bài sau 24 giờ.');
-    } else {
-      await sendNotification(
-        userId,
-        'Xác minh thành công!',
-        'Tài khoản của bạn đã được xác minh. Bạn có thể đăng tin cho thuê ngay!',
-        'verification_approved'
-      );
-      showToast('success', 'Thành công', 'Đã cấp quyền đăng bài cho tài khoản!');
-    }
+    await sendNotification(
+      userId,
+      'Xác minh thành công!',
+      'Tài khoản của bạn đã được xác minh. Bạn có thể đăng tin cho thuê ngay!',
+      'verification_approved'
+    );
+    showToast('success', 'Thành công', 'Đã cấp quyền đăng bài cho tài khoản!');
 
     loadVerifications();
   } catch (e) {
