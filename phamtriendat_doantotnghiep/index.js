@@ -781,16 +781,16 @@ function parseSePayAmount(raw) {
   const text = String(raw || "").trim();
   if (!text) return 0;
 
-  // Ưu tiên lấy chuỗi số thuần để tránh lỗi locale 10.000 / 10,000 / 10 000 đ
-  const digits = text.replace(/[^\d]/g, "");
+  // Xóa phần thập phân .00 nếu có ở cuối chuỗi để tránh bị parse thành hàng triệu
+  let cleaned = text.replace(/\.00$/, "");
+
+  // Sau đó ưu tiên lấy chuỗi số thuần để tránh lỗi locale 10.000 / 10,000 / 10 000 đ
+  const digits = cleaned.replace(/[^\d]/g, "");
   if (digits) {
     const parsedInt = Number.parseInt(digits, 10);
     return Number.isFinite(parsedInt) ? parsedInt : 0;
   }
-
-  const normalized = text.replace(/,/g, "");
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) ? Math.round(parsed) : 0;
+  return 0;
 }
 
 function extractSePayTxId(tx) {
