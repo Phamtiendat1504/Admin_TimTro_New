@@ -50,7 +50,8 @@ function normalizeNoAccentUpper(raw) {
   return String(raw || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .toUpperCase();
+    .toUpperCase()
+    .replace(/Đ/g, "D");
 }
 
 function analyzeSideSignals(text) {
@@ -138,7 +139,26 @@ async function readVisionTextFromUrl(imageUrl) {
   return result?.fullTextAnnotation?.text || "";
 }
 
-async function detectCccdByCloudVision(frontUrl, backUrl, expectedCccd) {
+function isNameMatched(visionText, expectedName) {
+  if (!expectedName) return true;
+  const normalizedVision = normalizeNoAccentUpper(visionText);
+  const normalizedExpected = normalizeNoAccentUpper(expectedName);
+  
+  if (normalizedVision.includes(normalizedExpected)) return true;
+  
+  const expectedWords = normalizedExpected.split(/\s+/).filter(Boolean);
+  if (expectedWords.length === 0) return true;
+  
+  let currentIndex = 0;
+  for (const word of expectedWords) {
+    const foundIndex = normalizedVision.indexOf(word, currentIndex);
+    if (foundIndex === -1) return false;
+    currentIndex = foundIndex + word.length;
+  }
+  return true;
+}
+
+async function detectCccdByCloudVision(frontUrl, backUrl, expectedCccd, expectedFullName) {
   const [frontText, backText] = await Promise.all([
     readVisionTextFromUrl(frontUrl),
     readVisionTextFromUrl(backUrl),
@@ -156,26 +176,33 @@ async function detectCccdByCloudVision(frontUrl, backUrl, expectedCccd) {
 
   const candidates = extractCccdCandidates(`${frontText}\n${backText}`);
   const matched = candidates.find((v) => v === expectedCccd);
-  if (matched) {
+  if (!matched) {
+    if (candidates.length === 0) {
+      return {
+        passed: false,
+        reason: "Hệ thống không thể đọc được số Căn cước công dân 12 chữ số hợp lệ từ ảnh.",
+        recognizedCccd: "",
+      };
+    }
     return {
-      passed: true,
-      reason: "Hệ thống xác thực thành công số Căn cước công dân đã nộp.",
+      passed: false,
+      reason: "Hệ thống phát hiện được Căn cước công dân nhưng không khớp với số đã nộp.",
+      recognizedCccd: candidates[0],
+    };
+  }
+
+  if (expectedFullName && !isNameMatched(frontText, expectedFullName)) {
+    return {
+      passed: false,
+      reason: `Số CCCD khớp nhưng Họ và Tên trên thẻ không khớp với tên tài khoản (${expectedFullName}). Vui lòng cập nhật đúng tên thật trên app.`,
       recognizedCccd: matched,
     };
   }
 
-  if (candidates.length === 0) {
-    return {
-      passed: false,
-      reason: "Hệ thống không thể đọc được số Căn cước công dân 12 chữ số hợp lệ từ ảnh.",
-      recognizedCccd: "",
-    };
-  }
-
   return {
-    passed: false,
-    reason: "Hệ thống phát hiện được Căn cước công dân nhưng không khớp với số đã nộp.",
-    recognizedCccd: candidates[0],
+    passed: true,
+    reason: "Hệ thống xác thực thành công số Căn cước công dân và Họ Tên đã nộp.",
+    recognizedCccd: matched,
   };
 }
 
@@ -394,6 +421,7 @@ exports.autoReviewVerificationByCloudVision = onDocumentWritten("verifications/{
   const userRef = db.collection("users").doc(uid);
   const userDoc = await userRef.get();
   const currentRole = String(userDoc.data()?.role || "user").toLowerCase();
+  const expectedFullName = String(userDoc.data()?.fullName || "").trim();
   const isAdmin = currentRole === "admin";
   const escalatedFromClient = data.escalatedToAdmin === true ||
     String(data.autoCheckStatus || "").trim().toLowerCase() === "failed_escalated";
@@ -491,7 +519,7 @@ exports.autoReviewVerificationByCloudVision = onDocumentWritten("verifications/{
 
   let cloudResult;
   try {
-    cloudResult = await detectCccdByCloudVision(frontUrl, backUrl, expectedCccd);
+    cloudResult = await detectCccdByCloudVision(frontUrl, backUrl, expectedCccd, expectedFullName);
   } catch (error) {
     console.error("[autoReviewVerificationByCloudVision] Cloud Vision error:", error);
     await moveToAdminReview("Cloud Vision is temporarily unavailable. Admin review is required.");
@@ -790,7 +818,9 @@ function pickSePayContent(tx) {
 }
 
 async function fetchSePayTransactions(token) {
-  const res = await fetch(SEPAY_TRANSACTIONS_API, {
+  // limit=100 để lấy đủ giao dịch gần nhất, tránh bỏ sót khi có nhiều giao dịch.
+  const url = `${SEPAY_TRANSACTIONS_API}?limit=100`;
+  const res = await fetch(url, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -827,6 +857,7 @@ async function fetchSePayTransactions(token) {
     rawContent: pickSePayContent(tx),
   }));
 }
+
 
 exports.processPendingSlotUpgradePayments = onSchedule(
   { schedule: "every 1 minutes", timeZone: "Asia/Ho_Chi_Minh", secrets: [sepayApiToken] },
@@ -946,15 +977,13 @@ exports.processPendingSlotUpgradePayments = onSchedule(
 
         const userSnap = await tx.get(userRef);
         const currentSlots = Number(userSnap.data()?.purchasedSlots || 0);
-        const expectedFreshAmount = Number(freshReq.amount || 0);
-        if (expectedFreshAmount <= 0 || matchedTx.amountIn !== expectedFreshAmount) {
-          tx.set(doc.ref, {
-            status: "failed",
-            failReason: "amount_mismatch",
-            updatedAt: now,
-            paidAmount: matchedTx.amountIn,
-            paidContent: matchedTx.rawContent,
-          }, { merge: true });
+        const expectedFreshAmount = Math.round(Number(freshReq.amount || 0));
+        const receivedAmount = Math.round(Number(matchedTx.amountIn || 0));
+        if (expectedFreshAmount <= 0 || receivedAmount !== expectedFreshAmount) {
+          // Số tiền không khớp: bỏ qua để lần poll tiếp theo thử lại (không đặt 'failed' vĩnh viễn).
+          console.warn("[processPendingSlotUpgradePayments] amount_mismatch, skipping:", {
+            requestId: doc.id, expected: expectedFreshAmount, received: receivedAmount,
+          });
           return;
         }
 
@@ -999,6 +1028,30 @@ exports.processPendingFeaturedUpgradePayments = onSchedule(
 
     const db = admin.firestore();
     const now = Date.now();
+
+    // Reset các document bị kẹt ở "failed" do amount_mismatch cũ (lỗi logic cũ) về lại waiting_for_payment
+    // để chúng được xử lý lại trong lần poll này.
+    const failedSnap = await db.collection("featured_upgrade_requests")
+      .where("status", "==", "failed")
+      .where("failReason", "==", "amount_mismatch")
+      .limit(50)
+      .get();
+    if (!failedSnap.empty) {
+      const resetBatch = db.batch();
+      failedSnap.docs.forEach((d) => {
+        // Reset về waiting_for_payment bất kể hết hạn hay chưa,
+        // vì người dùng đã chuyển tiền thành công. Hết hạn sẽ kiểm tra lại ở vòng poll chính.
+        // Đồng thời gia hạn expiresAt thêm 30 phút để kịp match giao dịch.
+        resetBatch.update(d.ref, {
+          status: "waiting_for_payment",
+          expiresAt: now + SLOT_UPGRADE_EXPIRE_MS,
+          updatedAt: now,
+        });
+      });
+      await resetBatch.commit();
+      console.log(`[processPendingFeaturedUpgradePayments] Reset ${failedSnap.size} amount_mismatch docs back to waiting_for_payment.`);
+    }
+
     const waitingSnap = await db.collection("featured_upgrade_requests")
       .where("status", "==", "waiting_for_payment")
       .limit(SLOT_UPGRADE_SCAN_LIMIT)
@@ -1076,15 +1129,13 @@ exports.processPendingFeaturedUpgradePayments = onSchedule(
           return;
         }
 
-        const expectedFreshAmount = Number(freshReq.amount || 0);
-        if (expectedFreshAmount <= 0 || matchedTx.amountIn !== expectedFreshAmount) {
-          tx.set(doc.ref, {
-            status: "failed",
-            failReason: "amount_mismatch",
-            updatedAt: now,
-            paidAmount: matchedTx.amountIn,
-            paidContent: matchedTx.rawContent,
-          }, { merge: true });
+        const expectedFreshAmount = Math.round(Number(freshReq.amount || 0));
+        const receivedAmount = Math.round(Number(matchedTx.amountIn || 0));
+        if (expectedFreshAmount <= 0 || receivedAmount !== expectedFreshAmount) {
+          // Số tiền không khớp: bỏ qua để lần poll tiếp theo thử lại (không đặt 'failed' vĩnh viễn).
+          console.warn("[processPendingFeaturedUpgradePayments] amount_mismatch, skipping:", {
+            requestId: doc.id, expected: expectedFreshAmount, received: receivedAmount,
+          });
           return;
         }
 

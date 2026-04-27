@@ -129,6 +129,21 @@ service cloud.firestore {
                       isSignedIn()
                       && resource.data.userId == request.auth.uid
                       && request.resource.data.userId == resource.data.userId
+                      && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+                        "featuredRequestStatus",
+                        "featuredRequestId",
+                        "featuredRequestUpdatedAt"
+                      ])
+                      && request.resource.data.featuredRequestStatus in [
+                        "waiting_for_payment",
+                        "paid_waiting_admin",
+                        "cancelled"
+                      ]
+                    )
+                    || (
+                      isSignedIn()
+                      && resource.data.userId == request.auth.uid
+                      && request.resource.data.userId == resource.data.userId
                       && !request.resource.data.diff(resource.data).changedKeys().hasAny([
                         "isFeatured",
                         "featuredStartAt",
@@ -426,21 +441,22 @@ service cloud.firestore {
         allow delete: if isAdmin();
       }
     }
+
     // CCCD REGISTRY
     match /cccd_registry/{cccdNumber} {
       allow read: if isSignedIn();
- 
+
       allow create: if isSignedIn()
                     && request.resource.data.uid == request.auth.uid
                     && request.resource.data.cccdNumber == cccdNumber
                     && request.resource.data.createdAt is int
                     && request.resource.data.updatedAt is int;
- 
+
       allow update: if isSignedIn()
                     && resource.data.uid == request.auth.uid
                     && request.resource.data.uid == resource.data.uid
                     && request.resource.data.cccdNumber == resource.data.cccdNumber;
- 
+
       allow delete: if isAdmin();
     }
 
@@ -454,7 +470,7 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
-    // Server-side OCR counter (no client write needed)
+    // Server-side OCR counter
     match /verification_counters/{uid} {
       allow read, write: if isAdmin();
     }
