@@ -1,4 +1,4 @@
-// =======================================
+﻿// =======================================
 // FIREBASE CONFIG
 // firebase deploy --only hosting
 // =======================================
@@ -1042,11 +1042,28 @@ async function loadFeaturedRequests(filter) {
   }
 }
 
+let featuredSearchKw = '';
+function filterFeaturedSearch() {
+  featuredSearchKw = document.getElementById('searchFeatured')?.value || '';
+  state.featured.page = 1;
+  renderFeaturedRequests();
+}
+function getFilteredFeaturedDocs() {
+  const kw = normalizeVietnameseText(featuredSearchKw);
+  if (!kw) return state.featured.docs;
+  return state.featured.docs.filter(doc => {
+    const d = doc.data();
+    return normalizeVietnameseText(d.roomTitle).includes(kw)
+        || normalizeVietnameseText(d.roomId).includes(kw)
+        || normalizeVietnameseText(d.uid).includes(kw);
+  });
+}
+
 function renderFeaturedRequests() {
   const tbody = document.getElementById('featuredTableBody');
-  const all = state.featured.docs;
+  const all = getFilteredFeaturedDocs();
   if (!all.length) {
-    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Không có yêu cầu nổi bật</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state">Không có yêu cầu nổi bật</div></td></tr>';
     renderResultInfo('featuredResultInfo', 1, 0);
     document.getElementById('featuredPagination').innerHTML = '';
     return;
@@ -1069,9 +1086,44 @@ function renderFeaturedRequests() {
           <button class="btn btn-reject" onclick="rejectFeaturedRequest('${doc.id}','${d.uid}','${d.roomId}','${safeTitle}')">Từ chối</button>
         ` : ''}
         <button class="btn btn-view" onclick="viewPost('${d.roomId}')">Xem bài</button>
+        <button class="btn btn-delete" onclick="deleteFeaturedRequest('${doc.id}','${d.roomId}','${status}')"><i class="fas fa-trash"></i></button>
       </div></td>
     </tr>`;
   }).join('');
+}
+
+async function deleteFeaturedRequest(reqId, roomId, status) {
+  const ok = await showConfirm('Xóa yêu cầu', 'Xóa yêu cầu nổi bật này?', 'danger');
+  if (!ok) return;
+  try {
+    await db.collection('featured_upgrade_requests').doc(reqId).delete();
+    if (status === 'approved' && roomId) {
+      await db.collection('rooms').doc(roomId).set({ isFeatured: false, featuredUntil: null }, { merge: true });
+    }
+    showToast('success', 'Đã xóa', 'Yêu cầu nổi bật đã bị xóa');
+    loadFeaturedRequests(getActiveTab('featuredTabGroup'));
+  } catch (e) { showToast('error', 'Lỗi', e.message); }
+}
+
+async function deleteAllFeatured() {
+  const docs = getFilteredFeaturedDocs();
+  if (!docs.length) { showToast('warning', 'Không có dữ liệu', 'Không có yêu cầu nào để xóa.'); return; }
+  const ok = await showConfirm('Xóa tất cả', `Bạn sắp xóa ${docs.length} yêu cầu nổi bật. Hành động này không thể hoàn tác.`, 'danger');
+  if (!ok) return;
+  showToast('info', 'Đang xử lý', `Đang xóa ${docs.length} yêu cầu...`, 3000);
+  let failed = 0;
+  for (const doc of docs) {
+    try {
+      const d = doc.data();
+      await db.collection('featured_upgrade_requests').doc(doc.id).delete();
+      if (d.status === 'approved' && d.roomId) {
+        await db.collection('rooms').doc(d.roomId).set({ isFeatured: false, featuredUntil: null }, { merge: true });
+      }
+    } catch (e) { failed++; }
+  }
+  if (failed === 0) showToast('success', 'Thành công', `Đã xóa ${docs.length} yêu cầu.`);
+  else showToast('warning', 'Một phần', `Xóa ${docs.length - failed}/${docs.length}. ${failed} lỗi.`);
+  loadFeaturedRequests(getActiveTab('featuredTabGroup'));
 }
 
 async function approveFeaturedRequest(requestId, uid, roomId, title) {
@@ -1172,11 +1224,29 @@ async function loadPayments(filter) {
   }
 }
 
+let paymentsSearchKw = '';
+function filterPaymentsSearch() {
+  paymentsSearchKw = document.getElementById('searchPayments')?.value || '';
+  state.payments.page = 1;
+  renderPayments();
+}
+function getFilteredPaymentsDocs() {
+  const kw = normalizeVietnameseText(paymentsSearchKw);
+  if (!kw) return state.payments.docs;
+  return state.payments.docs.filter(item => {
+    const d = item.data;
+    return normalizeVietnameseText(d.uid).includes(kw)
+        || normalizeVietnameseText(d.transferNote).includes(kw)
+        || normalizeVietnameseText(d.label).includes(kw)
+        || normalizeVietnameseText(d.roomTitle).includes(kw);
+  });
+}
+
 function renderPayments() {
   const tbody = document.getElementById('paymentsTableBody');
-  const all = state.payments.docs;
+  const all = getFilteredPaymentsDocs();
   if (!all.length) {
-    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Không có giao dịch</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state">Không có giao dịch</div></td></tr>';
     renderResultInfo('paymentsResultInfo', 1, 0);
     document.getElementById('paymentsPagination').innerHTML = '';
     return;
@@ -1187,14 +1257,112 @@ function renderPayments() {
   tbody.innerHTML = page.map(item => {
     const d = item.data;
     const status = d.status || 'waiting_for_payment';
+    const canDelete = ['cancelled','expired','failed','waiting_for_payment'].includes(status);
     return `<tr>
       <td><div class="td-name">${item.type === 'featured' ? 'Đẩy nổi bật' : 'Mua lượt đăng'}</div><div class="td-email">${escapeHtml(d.label || d.code || '')}</div></td>
       <td><div class="td-email">${escapeHtml(d.uid || '')}</div>${d.roomTitle ? `<div class="td-email">${escapeHtml(d.roomTitle)}</div>` : ''}</td>
       <td><b>${fmt(d.amount || 0)} đ</b><div class="td-email">${escapeHtml(d.transferNote || '')}</div></td>
       <td>${fmtDateTime(d.paidAt || d.createdAt)}</td>
       <td><span class="badge ${paymentStatusBadge(status, item.type)}">${paymentStatusText(status, item.type)}</span></td>
+      <td style="text-align:right">${canDelete ? `<button class="btn btn-delete" onclick="deletePaymentRecord('${item.id}','${item.type}')"><i class="fas fa-trash"></i></button>` : ''}</td>
     </tr>`;
   }).join('');
+}
+
+async function deletePaymentRecord(id, type) {
+  const col = type === 'featured' ? 'featured_upgrade_requests' : 'slot_upgrade_requests';
+  const ok = await showConfirm('Xóa giao dịch', 'Xóa bản ghi giao dịch này?', 'danger');
+  if (!ok) return;
+  try {
+    await db.collection(col).doc(id).delete();
+    showToast('success', 'Đã xóa', 'Giao dịch đã bị xóa');
+    loadPayments(getActiveTab('paymentsTabGroup'));
+  } catch (e) { showToast('error', 'Lỗi', e.message); }
+}
+
+let reviewsSearchKw = '';
+let reviewsStarFilter = '';
+function filterReviewsSearch() {
+  reviewsSearchKw = document.getElementById('searchReviews')?.value || '';
+  state.reviews.page = 1;
+  renderReviews();
+}
+function filterReviewsByStars() {
+  reviewsStarFilter = document.getElementById('filterReviewStars')?.value || '';
+  state.reviews.page = 1;
+  renderReviews();
+}
+function getFilteredReviewsDocs() {
+  let docs = state.reviews.docs;
+  if (reviewsStarFilter) docs = docs.filter(doc => String(doc.data().rating || '') === reviewsStarFilter);
+  const kw = normalizeVietnameseText(reviewsSearchKw);
+  if (!kw) return docs;
+  return docs.filter(doc => {
+    const d = doc.data();
+    return normalizeVietnameseText(d.comment).includes(kw)
+        || normalizeVietnameseText(d.userName).includes(kw)
+        || normalizeVietnameseText(d.roomTitle).includes(kw);
+  });
+}
+
+function renderReviews() {
+  const tbody = document.getElementById('reviewsTableBody');
+  const all = getFilteredReviewsDocs();
+  if (!all.length) {
+    tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state">Không có đánh giá</div></td></tr>';
+    renderResultInfo('reviewsResultInfo', 1, 0);
+    document.getElementById('reviewsPagination').innerHTML = '';
+    return;
+  }
+  renderResultInfo('reviewsResultInfo', state.reviews.page, all.length);
+  renderPagination('reviewsPagination', 'reviews', all.length);
+  const page = all.slice((state.reviews.page-1)*PAGE_SIZE, state.reviews.page*PAGE_SIZE);
+  tbody.innerHTML = page.map(doc => {
+    const d = doc.data();
+    const status = d.status || 'approved';
+    return `<tr>
+      <td><div class="td-name">${'★'.repeat(Number(d.rating || 0))}</div><div class="td-email" style="max-width:360px">${escapeHtml(d.comment || '')}</div><span class="badge ${status === 'approved' ? 'badge-approved' : 'badge-rejected'}">${status === 'approved' ? 'Đang hiển thị' : 'Đã ẩn'}</span></td>
+      <td><div class="td-name">${escapeHtml(d.roomTitle || d.roomId || '')}</div><div class="td-email">Chủ trọ: ${escapeHtml(d.landlordId || '')}</div></td>
+      <td><div class="td-name">${escapeHtml(d.userName || 'Người dùng')}</div><div class="td-email">${escapeHtml(d.userId || '')}</div></td>
+      <td>${fmtDateTime(d.createdAt)}</td>
+      <td style="text-align:right"><div class="list-actions">
+        <button class="btn btn-view" onclick="viewReview('${doc.id}')">Xem</button>
+        ${status === 'approved' ? `<button class="btn btn-reject" onclick="hideReview('${doc.id}')">Ẩn</button>` : `<button class="btn btn-approve" onclick="showReview('${doc.id}')">Để lại</button>`}
+        <button class="btn btn-delete" onclick="deleteReview('${doc.id}')"><i class="fas fa-trash"></i></button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+async function deleteAllReviews() {
+  const docs = getFilteredReviewsDocs();
+  if (!docs.length) { showToast('warning', 'Không có dữ liệu', 'Không có đánh giá nào để xóa.'); return; }
+  const ok = await showConfirm('Xóa tất cả', `Xóa ${docs.length} đánh giá?`, 'danger');
+  if (!ok) return;
+  let failed = 0;
+  for (const doc of docs) {
+    try { await db.collection('reviews').doc(doc.id).delete(); } catch (e) { failed++; }
+  }
+  if (failed === 0) showToast('success', 'Thành công', `Đã xóa ${docs.length} đánh giá.`);
+  else showToast('warning', 'Một phần', `Xóa ${docs.length - failed}/${docs.length}. ${failed} lỗi.`);
+  loadReviews(getActiveTab('reviewsTabGroup'));
+}
+
+async function deleteAllPayments() {
+  const items = getFilteredPaymentsDocs().filter(item => ['cancelled','expired','failed','waiting_for_payment'].includes(item.data.status || ''));
+  if (!items.length) { showToast('warning', 'Không thể xóa', 'Chỉ có thể xóa các giao dịch hết hạn, đã hủy hoặc chờ thanh toán.'); return; }
+  const ok = await showConfirm('Xóa tất cả', `Xóa ${items.length} giao dịch?`, 'danger');
+  if (!ok) return;
+  let failed = 0;
+  for (const item of items) {
+    try {
+      const col = item.type === 'featured' ? 'featured_upgrade_requests' : 'slot_upgrade_requests';
+      await db.collection(col).doc(item.id).delete();
+    } catch (e) { failed++; }
+  }
+  if (failed === 0) showToast('success', 'Thành công', `Đã xóa ${items.length} giao dịch.`);
+  else showToast('warning', 'Một phần', `Xóa ${items.length - failed}/${items.length}. ${failed} lỗi.`);
+  loadPayments(getActiveTab('paymentsTabGroup'));
 }
 
 async function loadReviews(filter) {
@@ -2509,11 +2677,46 @@ function renderSupportTickets() {
       <td>${escapeHtml(d.lastMessage || '')}</td>
       <td>${fmtDateTime(d.updatedAt)}</td>
       <td><span class="badge ${s.cls}">${s.label}</span></td>
-      <td style="text-align:right"><button class="btn btn-view" onclick="openSupportTicket('${doc.id}')">Xem</button></td>
+      <td style="text-align:right"><div class="list-actions"><button class="btn btn-view" onclick="openSupportTicket('${doc.id}')">Xem</button>${['resolved','closed'].includes(d.status)?'<button class="btn btn-delete" onclick="deleteSupportTicket(\\''+doc.id+'\\')"><i class="fas fa-trash"></i></button>':''}</div></td>
     </tr>`;
   }).join('');
 }
 
+
+async function deleteSupportTicket(ticketId) {
+  const ok = await showConfirm('Xoa ticket', 'Xoa yeu cau ho tro nay?', 'danger');
+  if (!ok) return;
+  try {
+    const msgsSnap = await db.collection('support_tickets').doc(ticketId).collection('messages').get();
+    const batch = db.batch();
+    msgsSnap.docs.forEach(m => batch.delete(m.ref));
+    batch.delete(db.collection('support_tickets').doc(ticketId));
+    await batch.commit();
+    showToast('success', 'Da xoa', 'Ticket ho tro da bi xoa');
+    loadSupportTickets(getActiveTab('supportTabGroup'));
+  } catch (e) { showToast('error', 'Loi', e.message); }
+}
+
+async function deleteAllSupport() {
+  const docs = getFilteredSupportDocs().filter(doc => ['resolved','closed'].includes(doc.data().status));
+  if (!docs.length) { showToast('warning', 'Khong the xoa', 'Chi xoa duoc ticket da xu ly hoac da dong.'); return; }
+  const ok = await showConfirm('Xoa tat ca', 'Xoa ' + docs.length + ' ticket ho tro?', 'danger');
+  if (!ok) return;
+  showToast('info', 'Dang xu ly', 'Dang xoa ' + docs.length + ' ticket...', 3000);
+  let failed = 0;
+  for (const doc of docs) {
+    try {
+      const msgsSnap = await db.collection('support_tickets').doc(doc.id).collection('messages').get();
+      const batch = db.batch();
+      msgsSnap.docs.forEach(m => batch.delete(m.ref));
+      batch.delete(db.collection('support_tickets').doc(doc.id));
+      await batch.commit();
+    } catch (e) { failed++; }
+  }
+  if (failed === 0) showToast('success', 'Thanh cong', 'Da xoa ' + docs.length + ' ticket.');
+  else showToast('warning', 'Mot phan', 'Xoa ' + (docs.length - failed) + '/' + docs.length + '. ' + failed + ' loi.');
+  loadSupportTickets(getActiveTab('supportTabGroup'));
+}
 async function openSupportTicket(ticketId) {
   try {
     const doc = await db.collection('support_tickets').doc(ticketId).get();

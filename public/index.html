@@ -2500,6 +2500,8 @@ tbody tr:hover td {
             <button class="tab-btn" data-filter="rejected">Từ chối</button>
             <button class="tab-btn" data-filter="all">Tất cả</button>
           </div>
+          <div class="search-box"><i class="fas fa-search"></i><input type="text" id="searchFeatured" placeholder="Tìm tên bài đăng..." oninput="filterFeaturedSearch()"></div>
+          <button class="btn btn-delete" onclick="deleteAllFeatured()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa tất cả</button>
         </div>
         <div class="result-info" id="featuredResultInfo"></div>
         <div class="card">
@@ -2521,6 +2523,8 @@ tbody tr:hover td {
             <button class="tab-btn" data-filter="slot">Mua lượt đăng</button>
             <button class="tab-btn" data-filter="featured">Đẩy nổi bật</button>
           </div>
+          <div class="search-box"><i class="fas fa-search"></i><input type="text" id="searchPayments" placeholder="Tìm UID, mã GD..." oninput="filterPaymentsSearch()"></div>
+          <button class="btn btn-delete" onclick="deleteAllPayments()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa tất cả</button>
         </div>
         <div class="result-info" id="paymentsResultInfo"></div>
         <div class="card">
@@ -2542,6 +2546,16 @@ tbody tr:hover td {
             <button class="tab-btn" data-filter="hidden">Đã ẩn</button>
             <button class="tab-btn" data-filter="all">Tất cả</button>
           </div>
+          <div class="search-box"><i class="fas fa-search"></i><input type="text" id="searchReviews" placeholder="Tìm nội dung, tên..." oninput="filterReviewsSearch()"></div>
+          <select class="filter-select" id="filterReviewStars" onchange="filterReviewsByStars()">
+            <option value="">Tất cả sao</option>
+            <option value="5">5 sao</option>
+            <option value="4">4 sao</option>
+            <option value="3">3 sao</option>
+            <option value="2">2 sao</option>
+            <option value="1">1 sao</option>
+          </select>
+          <button class="btn btn-delete" onclick="deleteAllReviews()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa tất cả</button>
         </div>
         <div class="result-info" id="reviewsResultInfo"></div>
         <div class="card">
@@ -2565,6 +2579,11 @@ tbody tr:hover td {
             <button class="tab-btn" data-filter="closed">Đã đóng</button>
             <button class="tab-btn" data-filter="all">Tất cả</button>
           </div>
+          <div class="search-box"><i class="fas fa-search"></i><input type="text" id="searchSupport" placeholder="Tìm tiêu đề, người gửi..." oninput="filterSupportSearch()"></div>
+          <select class="filter-select" id="filterSupportCategory" onchange="filterSupportByCategory()">
+            <option value="">Tất cả loại</option>
+          </select>
+          <button class="btn btn-delete" onclick="deleteAllSupport()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa tất cả</button>
         </div>
         <div class="result-info" id="supportResultInfo"></div>
         <div class="card">

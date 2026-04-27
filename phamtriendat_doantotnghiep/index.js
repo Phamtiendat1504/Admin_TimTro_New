@@ -1,4 +1,4 @@
-const { setGlobalOptions } = require("firebase-functions");
+  const { setGlobalOptions } = require("firebase-functions");
 const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { onRequest } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
