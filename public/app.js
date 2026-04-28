@@ -1476,6 +1476,83 @@ async function deleteReview(id) {
 let postsSearchKeyword = '';
 let postsLocationFilter = '';
 const selectedPostIds = new Set();
+const selectedFeaturedIds = new Set();
+const selectedPaymentsIds = new Set();
+const selectedReviewsIds = new Set();
+const selectedSupportIds = new Set();
+
+function updateFeaturedSelectAllState(pageDocs) {
+  const selectAll = document.getElementById('selectAllFeatured');
+  if (!selectAll) return;
+  if (!pageDocs || pageDocs.length === 0) { selectAll.checked = false; selectAll.indeterminate = false; return; }
+  const selectedCount = pageDocs.filter(doc => selectedFeaturedIds.has(doc.id)).length;
+  selectAll.checked = selectedCount === pageDocs.length;
+  selectAll.indeterminate = selectedCount > 0 && selectedCount < pageDocs.length;
+}
+function toggleFeaturedSelection(id, checked) {
+  if (checked) selectedFeaturedIds.add(id); else selectedFeaturedIds.delete(id);
+  updateFeaturedSelectAllState(getFilteredFeaturedDocs().slice((state.featured.page-1)*PAGE_SIZE, state.featured.page*PAGE_SIZE));
+}
+function toggleSelectAllFeatured(checked) {
+  const pageDocs = getFilteredFeaturedDocs().slice((state.featured.page-1)*PAGE_SIZE, state.featured.page*PAGE_SIZE);
+  pageDocs.forEach(doc => { if (checked) selectedFeaturedIds.add(doc.id); else selectedFeaturedIds.delete(doc.id); });
+  renderFeaturedRequests();
+}
+
+function updatePaymentsSelectAllState(pageDocs) {
+  const selectAll = document.getElementById('selectAllPayments');
+  if (!selectAll) return;
+  if (!pageDocs || pageDocs.length === 0) { selectAll.checked = false; selectAll.indeterminate = false; return; }
+  const selectedCount = pageDocs.filter(doc => selectedPaymentsIds.has(doc.docId)).length;
+  selectAll.checked = selectedCount === pageDocs.length;
+  selectAll.indeterminate = selectedCount > 0 && selectedCount < pageDocs.length;
+}
+function togglePaymentsSelection(id, checked) {
+  if (checked) selectedPaymentsIds.add(id); else selectedPaymentsIds.delete(id);
+  updatePaymentsSelectAllState(getFilteredPaymentsDocs().slice((state.payments.page-1)*PAGE_SIZE, state.payments.page*PAGE_SIZE));
+}
+function toggleSelectAllPayments(checked) {
+  const pageDocs = getFilteredPaymentsDocs().slice((state.payments.page-1)*PAGE_SIZE, state.payments.page*PAGE_SIZE);
+  pageDocs.forEach(doc => { if (checked) selectedPaymentsIds.add(doc.docId); else selectedPaymentsIds.delete(doc.docId); });
+  renderPayments();
+}
+
+function updateReviewsSelectAllState(pageDocs) {
+  const selectAll = document.getElementById('selectAllReviews');
+  if (!selectAll) return;
+  if (!pageDocs || pageDocs.length === 0) { selectAll.checked = false; selectAll.indeterminate = false; return; }
+  const selectedCount = pageDocs.filter(doc => selectedReviewsIds.has(doc.id)).length;
+  selectAll.checked = selectedCount === pageDocs.length;
+  selectAll.indeterminate = selectedCount > 0 && selectedCount < pageDocs.length;
+}
+function toggleReviewsSelection(id, checked) {
+  if (checked) selectedReviewsIds.add(id); else selectedReviewsIds.delete(id);
+  updateReviewsSelectAllState(getFilteredReviewsDocs().slice((state.reviews.page-1)*PAGE_SIZE, state.reviews.page*PAGE_SIZE));
+}
+function toggleSelectAllReviews(checked) {
+  const pageDocs = getFilteredReviewsDocs().slice((state.reviews.page-1)*PAGE_SIZE, state.reviews.page*PAGE_SIZE);
+  pageDocs.forEach(doc => { if (checked) selectedReviewsIds.add(doc.id); else selectedReviewsIds.delete(doc.id); });
+  renderReviews();
+}
+
+function updateSupportSelectAllState(pageDocs) {
+  const selectAll = document.getElementById('selectAllSupport');
+  if (!selectAll) return;
+  if (!pageDocs || pageDocs.length === 0) { selectAll.checked = false; selectAll.indeterminate = false; return; }
+  const selectedCount = pageDocs.filter(doc => selectedSupportIds.has(doc.id)).length;
+  selectAll.checked = selectedCount === pageDocs.length;
+  selectAll.indeterminate = selectedCount > 0 && selectedCount < pageDocs.length;
+}
+function toggleSupportSelection(id, checked) {
+  if (checked) selectedSupportIds.add(id); else selectedSupportIds.delete(id);
+  updateSupportSelectAllState(getFilteredSupportDocs().slice((state.support.page-1)*PAGE_SIZE, state.support.page*PAGE_SIZE));
+}
+function toggleSelectAllSupport(checked) {
+  const pageDocs = getFilteredSupportDocs().slice((state.support.page-1)*PAGE_SIZE, state.support.page*PAGE_SIZE);
+  pageDocs.forEach(doc => { if (checked) selectedSupportIds.add(doc.id); else selectedSupportIds.delete(doc.id); });
+  renderSupportTickets();
+}
+
 function normalizeVietnameseText(value) {
   return String(value || '')
     .normalize('NFD')
