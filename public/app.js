@@ -2677,7 +2677,7 @@ function renderSupportTickets() {
       <td>${escapeHtml(d.lastMessage || '')}</td>
       <td>${fmtDateTime(d.updatedAt)}</td>
       <td><span class="badge ${s.cls}">${s.label}</span></td>
-      <td style="text-align:right"><div class="list-actions"><button class="btn btn-view" onclick="openSupportTicket('${doc.id}')">Xem</button>${['resolved','closed'].includes(d.status)?'<button class="btn btn-delete" onclick="deleteSupportTicket(\\''+doc.id+'\\')"><i class="fas fa-trash"></i></button>':''}</div></td>
+      <td style="text-align:right"><div class="list-actions"><button class="btn btn-view" onclick="openSupportTicket('${doc.id}')">Xem</button>${['resolved','closed'].includes(d.status)?`<button class="btn btn-delete" onclick="deleteSupportTicket('${doc.id}')"><i class="fas fa-trash"></i></button>`:''}</div></td>
     </tr>`;
   }).join('');
 }
