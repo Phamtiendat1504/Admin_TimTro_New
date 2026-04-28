@@ -951,9 +951,6 @@ function renderPosts() {
   const tbody = document.getElementById('postsTableBody');
   const all = getFilteredPostsDocs();
   const total = all.length;
-  updateSupportSelectAllState(page);
-  updateReviewsSelectAllState(page);
-  updatePaymentsSelectAllState(page);
   if (total === 0) {
     tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><i class="fas fa-file-alt"></i>Không có bài đăng nào</div></td></tr>';
     renderResultInfo('postsResultInfo', 1, 0);
@@ -2023,9 +2020,6 @@ function renderUsers() {
   const all = getFilteredUsersDocs();
 
   const total = all.length;
-  updateSupportSelectAllState(page);
-  updateReviewsSelectAllState(page);
-  updatePaymentsSelectAllState(page);
   if (total === 0) {
     tbody.innerHTML = '<tr><td colspan="8"><div class="empty-state"><i class="fas fa-users"></i>Không có người dùng nào</div></td></tr>';
     renderResultInfo('usersResultInfo', 1, 0);
@@ -2036,6 +2030,7 @@ function renderUsers() {
   renderResultInfo('usersResultInfo', state.users.page, total);
   renderPagination('usersPagination', 'users', total);
   const page = all.slice((state.users.page-1)*PAGE_SIZE, state.users.page*PAGE_SIZE);
+  updateUsersSelectAllState(page);
   tbody.innerHTML = page.map(doc => {
     const d    = doc.data();
     const rl   = d.role === 'admin' ? 'Admin' : 'User';
@@ -2618,9 +2613,6 @@ function renderAppt() {
   const tbody = document.getElementById('apptTableBody');
   const all = getFilteredAppointmentDocs();
   const total = all.length;
-  updateSupportSelectAllState(page);
-  updateReviewsSelectAllState(page);
-  updatePaymentsSelectAllState(page);
   if (total === 0) {
     tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><i class="fas fa-calendar"></i>Chưa có lịch hẹn nào</div></td></tr>';
     renderResultInfo('apptResultInfo', 1, 0);
@@ -2747,9 +2739,6 @@ function renderSupportTickets() {
   if (!tbody) return;
   const all = state.support.docs || [];
   const total = all.length;
-  updateSupportSelectAllState(page);
-  updateReviewsSelectAllState(page);
-  updatePaymentsSelectAllState(page);
   renderResultInfo('supportResultInfo', state.support.page, total);
   renderPagination('supportPagination', 'support', total);
   if (total === 0) {
@@ -2757,7 +2746,6 @@ function renderSupportTickets() {
     return;
   }
   const page = all.slice((state.support.page - 1) * PAGE_SIZE, state.support.page * PAGE_SIZE);
-  updateSupportSelectAllState(page);
   tbody.innerHTML = page.map(doc => {
     const d = doc.data();
     const s = supportStatusInfo(d.status);
