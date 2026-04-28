@@ -2677,6 +2677,7 @@ function renderSupportTickets() {
     return;
   }
   const page = all.slice((state.support.page - 1) * PAGE_SIZE, state.support.page * PAGE_SIZE);
+  updateSupportSelectAllState(page);
   tbody.innerHTML = page.map(doc => {
     const d = doc.data();
     const s = supportStatusInfo(d.status);
