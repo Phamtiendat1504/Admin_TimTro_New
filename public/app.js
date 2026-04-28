@@ -1078,7 +1078,8 @@ function renderFeaturedRequests() {
     const d = doc.data();
     const safeTitle = String(d.roomTitle || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     const status = d.status || 'waiting_for_payment';
-    return `<tr>
+      return `<tr data-created-at="${toEpochMs(d.createdAt)}">
+        <td style="text-align:center"><input type="checkbox" ${selectedFeaturedIds.has(doc.id) ? 'checked' : ''} onchange="toggleFeaturedSelection('${doc.id}', this.checked)"></td>
       <td><div class="td-name">${escapeHtml(d.roomTitle || d.roomId || 'Bài đăng')}</div><div class="td-email">${escapeHtml(d.roomId || '')}</div></td>
       <td><b>${escapeHtml(d.label || d.code || '')}</b><div class="td-email">${d.days || 0} ngày</div></td>
       <td><b>${fmt(d.amount || 0)} đ</b><div class="td-email">${escapeHtml(d.transferNote || '')}</div></td>
@@ -1263,7 +1264,8 @@ function renderPayments() {
     const d = item.data;
     const status = d.status || 'waiting_for_payment';
     const canDelete = ['cancelled','expired','failed','waiting_for_payment'].includes(status);
-    return `<tr>
+      return `<tr data-created-at="${toEpochMs(d.createdAt)}">
+        <td style="text-align:center"><input type="checkbox" ${selectedPaymentsIds.has(docId) ? 'checked' : ''} onchange="togglePaymentsSelection('${docId}', this.checked)"></td>
       <td><div class="td-name">${item.type === 'featured' ? 'Đẩy nổi bật' : 'Mua lượt đăng'}</div><div class="td-email">${escapeHtml(d.label || d.code || '')}</div></td>
       <td><div class="td-email">${escapeHtml(d.uid || '')}</div>${d.roomTitle ? `<div class="td-email">${escapeHtml(d.roomTitle)}</div>` : ''}</td>
       <td><b>${fmt(d.amount || 0)} đ</b><div class="td-email">${escapeHtml(d.transferNote || '')}</div></td>
@@ -1325,7 +1327,8 @@ function renderReviews() {
   tbody.innerHTML = page.map(doc => {
     const d = doc.data();
     const status = d.status || 'approved';
-    return `<tr>
+      return `<tr data-created-at="${toEpochMs(d.createdAt)}">
+        <td style="text-align:center"><input type="checkbox" ${selectedReviewsIds.has(doc.id) ? 'checked' : ''} onchange="toggleReviewsSelection('${doc.id}', this.checked)"></td>
       <td><div class="td-name">${'★'.repeat(Number(d.rating || 0))}</div><div class="td-email" style="max-width:360px">${escapeHtml(d.comment || '')}</div><span class="badge ${status === 'approved' ? 'badge-approved' : 'badge-rejected'}">${status === 'approved' ? 'Đang hiển thị' : 'Đã ẩn'}</span></td>
       <td><div class="td-name">${escapeHtml(d.roomTitle || d.roomId || '')}</div><div class="td-email">Chủ trọ: ${escapeHtml(d.landlordId || '')}</div></td>
       <td><div class="td-name">${escapeHtml(d.userName || 'Người dùng')}</div><div class="td-email">${escapeHtml(d.userId || '')}</div></td>
@@ -2683,6 +2686,7 @@ function renderSupportTickets() {
     const s = supportStatusInfo(d.status);
     const unread = d.unreadForAdmin === true ? '<span class="badge badge-rejected" style="margin-left:6px">Mới</span>' : '';
     return `<tr data-created-at="${toEpochMs(d.updatedAt)}">
+      <td style="text-align:center"><input type="checkbox" ${selectedSupportIds.has(doc.id) ? 'checked' : ''} onchange="toggleSupportSelection('${doc.id}', this.checked)"></td>
       <td>
         <div class="td-user">
           <div class="td-avatar">${escapeHtml((d.userName || 'U').charAt(0).toUpperCase())}</div>
