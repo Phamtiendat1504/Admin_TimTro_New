@@ -951,6 +951,9 @@ function renderPosts() {
   const tbody = document.getElementById('postsTableBody');
   const all = getFilteredPostsDocs();
   const total = all.length;
+  updateSupportSelectAllState(page);
+  updateReviewsSelectAllState(page);
+  updatePaymentsSelectAllState(page);
   if (total === 0) {
     tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><i class="fas fa-file-alt"></i>Không có bài đăng nào</div></td></tr>';
     renderResultInfo('postsResultInfo', 1, 0);
@@ -1105,8 +1108,9 @@ async function deleteFeaturedRequest(reqId, roomId, status) {
   } catch (e) { showToast('error', 'Lỗi', e.message); }
 }
 
-async function deleteAllFeatured() {
-  const docs = getFilteredFeaturedDocs();
+async function deleteSelectedFeatured() {
+  const ids = Array.from(selectedFeaturedIds);
+  const docs = state.featured.docs.filter(d => ids.includes(d.id));
   if (!docs.length) { showToast('warning', 'Không có dữ liệu', 'Không có yêu cầu nào để xóa.'); return; }
   const ok = await showConfirm('Xóa tất cả', `Bạn sắp xóa ${docs.length} yêu cầu nổi bật. Hành động này không thể hoàn tác.`, 'danger');
   if (!ok) return;
@@ -1255,6 +1259,7 @@ function renderPayments() {
   renderPagination('paymentsPagination', 'payments', all.length);
   const page = all.slice((state.payments.page-1)*PAGE_SIZE, state.payments.page*PAGE_SIZE);
   tbody.innerHTML = page.map(item => {
+    const docId = item.docId;
     const d = item.data;
     const status = d.status || 'waiting_for_payment';
     const canDelete = ['cancelled','expired','failed','waiting_for_payment'].includes(status);
@@ -1334,8 +1339,9 @@ function renderReviews() {
   }).join('');
 }
 
-async function deleteAllReviews() {
-  const docs = getFilteredReviewsDocs();
+async function deleteSelectedReviews() {
+  const ids = Array.from(selectedReviewsIds);
+  const docs = state.reviews.docs.filter(d => ids.includes(d.id));
   if (!docs.length) { showToast('warning', 'Không có dữ liệu', 'Không có đánh giá nào để xóa.'); return; }
   const ok = await showConfirm('Xóa tất cả', `Xóa ${docs.length} đánh giá?`, 'danger');
   if (!ok) return;
@@ -1348,8 +1354,9 @@ async function deleteAllReviews() {
   loadReviews(getActiveTab('reviewsTabGroup'));
 }
 
-async function deleteAllPayments() {
-  const items = getFilteredPaymentsDocs().filter(item => ['cancelled','expired','failed','waiting_for_payment'].includes(item.data.status || ''));
+async function deleteSelectedPayments() {
+  const ids = Array.from(selectedPaymentsIds);
+  const items = state.payments.docs.filter(item => ids.includes(item.docId)).filter(item => ['cancelled','expired','failed','waiting_for_payment'].includes(item.data.status || ''));
   if (!items.length) { showToast('warning', 'Không thể xóa', 'Chỉ có thể xóa các giao dịch hết hạn, đã hủy hoặc chờ thanh toán.'); return; }
   const ok = await showConfirm('Xóa tất cả', `Xóa ${items.length} giao dịch?`, 'danger');
   if (!ok) return;
@@ -1936,6 +1943,9 @@ function renderUsers() {
   const all = getFilteredUsersDocs();
 
   const total = all.length;
+  updateSupportSelectAllState(page);
+  updateReviewsSelectAllState(page);
+  updatePaymentsSelectAllState(page);
   if (total === 0) {
     tbody.innerHTML = '<tr><td colspan="8"><div class="empty-state"><i class="fas fa-users"></i>Không có người dùng nào</div></td></tr>';
     renderResultInfo('usersResultInfo', 1, 0);
@@ -2528,6 +2538,9 @@ function renderAppt() {
   const tbody = document.getElementById('apptTableBody');
   const all = getFilteredAppointmentDocs();
   const total = all.length;
+  updateSupportSelectAllState(page);
+  updateReviewsSelectAllState(page);
+  updatePaymentsSelectAllState(page);
   if (total === 0) {
     tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><i class="fas fa-calendar"></i>Chưa có lịch hẹn nào</div></td></tr>';
     renderResultInfo('apptResultInfo', 1, 0);
@@ -2654,6 +2667,9 @@ function renderSupportTickets() {
   if (!tbody) return;
   const all = state.support.docs || [];
   const total = all.length;
+  updateSupportSelectAllState(page);
+  updateReviewsSelectAllState(page);
+  updatePaymentsSelectAllState(page);
   renderResultInfo('supportResultInfo', state.support.page, total);
   renderPagination('supportPagination', 'support', total);
   if (total === 0) {
@@ -2697,8 +2713,9 @@ async function deleteSupportTicket(ticketId) {
   } catch (e) { showToast('error', 'Loi', e.message); }
 }
 
-async function deleteAllSupport() {
-  const docs = getFilteredSupportDocs().filter(doc => ['resolved','closed'].includes(doc.data().status));
+async function deleteSelectedSupport() {
+  const ids = Array.from(selectedSupportIds);
+  const docs = (state.support.docs||[]).filter(doc => ids.includes(doc.id)).filter(doc => ['resolved','closed'].includes(doc.data().status));
   if (!docs.length) { showToast('warning', 'Khong the xoa', 'Chi xoa duoc ticket da xu ly hoac da dong.'); return; }
   const ok = await showConfirm('Xoa tat ca', 'Xoa ' + docs.length + ' ticket ho tro?', 'danger');
   if (!ok) return;
@@ -2865,17 +2882,35 @@ const dateFilterMap = {
   users:          { from: 'userDateFrom',   to: 'userDateTo',   tbody: '#usersTableBody' },
   appointments:  { from: 'apptDateFrom',   to: 'apptDateTo',   tbody: '#apptTableBody'  },
   verifications: { from: 'verifyDateFrom', to: 'verifyDateTo', tbody: '#verifyTableBody' },
+  featured:      { from: 'featuredDateFrom', to: 'featuredDateTo', tbody: '#featuredTableBody' },
+  payments:      { from: 'paymentsDateFrom', to: 'paymentsDateTo', tbody: '#paymentsTableBody' },
+  reviews:       { from: 'reviewsDateFrom',  to: 'reviewsDateTo',  tbody: '#reviewsTableBody' },
+  support:       { from: 'supportDateFrom',  to: 'supportDateTo',  tbody: '#supportTableBody' },
 };
 const dateFilterState = {
   posts: { fromMs: null, toMs: null },
   users: { fromMs: null, toMs: null },
   appointments: { fromMs: null, toMs: null },
+  featured: { fromMs: null, toMs: null },
+  payments: { fromMs: null, toMs: null },
+  reviews: { fromMs: null, toMs: null },
+  support: { fromMs: null, toMs: null },
 };
 
 function isInDateRange(value, filter) {
   if (!filter) return true;
   const ts = toEpochMs(value);
   return (!filter.fromMs || ts >= filter.fromMs) && (!filter.toMs || ts <= filter.toMs);
+}
+
+function _callRenderForPage(page) {
+  if (page === 'posts') { state.posts.page = 1; renderPosts(); }
+  if (page === 'users') { state.users.page = 1; renderUsers(); }
+  if (page === 'appointments') { state.appt.page = 1; renderAppt(); }
+  if (page === 'featured') { state.featured.page = 1; renderFeaturedRequests(); }
+  if (page === 'payments') { state.payments.page = 1; renderPayments(); }
+  if (page === 'reviews') { state.reviews.page = 1; renderReviews(); }
+  if (page === 'support') { state.support.page = 1; renderSupportTickets(); }
 }
 
 function applyDateFilter(page) {
@@ -2887,25 +2922,12 @@ function applyDateFilter(page) {
 
   if (dateFilterState[page]) {
     dateFilterState[page] = { fromMs, toMs };
-    if (page === 'posts') {
-      state.posts.page = 1;
-      renderPosts();
-      return;
-    }
-    if (page === 'users') {
-      state.users.page = 1;
-      renderUsers();
-      return;
-    }
-    if (page === 'appointments') {
-      state.appt.page = 1;
-      renderAppt();
-      return;
-    }
+    _callRenderForPage(page);
+    return;
   }
 
   if (!fromMs && !toMs) return;
-  document.querySelectorAll(`${m.tbody} tr`).forEach(row => {
+  document.querySelectorAll(` tr`).forEach(row => {
     const ts = parseInt(row.dataset.createdAt||'0', 10);
     row.style.display = ((!fromMs||ts>=fromMs) && (!toMs||ts<=toMs)) ? '' : 'none';
   });
@@ -2918,24 +2940,11 @@ function clearDateFilter(page) {
 
   if (dateFilterState[page]) {
     dateFilterState[page] = { fromMs: null, toMs: null };
-    if (page === 'posts') {
-      state.posts.page = 1;
-      renderPosts();
-      return;
-    }
-    if (page === 'users') {
-      state.users.page = 1;
-      renderUsers();
-      return;
-    }
-    if (page === 'appointments') {
-      state.appt.page = 1;
-      renderAppt();
-      return;
-    }
+    _callRenderForPage(page);
+    return;
   }
 
-  document.querySelectorAll(`${m.tbody} tr`).forEach(row => { row.style.display = ''; });
+  document.querySelectorAll(` tr`).forEach(row => { row.style.display = ''; });
 }
 
 // ════════════════════════════════════════

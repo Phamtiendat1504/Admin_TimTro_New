@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="vi">
 <head>
   <meta charset="UTF-8">
@@ -2501,13 +2501,19 @@ tbody tr:hover td {
             <button class="tab-btn" data-filter="all">Tất cả</button>
           </div>
           <div class="search-box"><i class="fas fa-search"></i><input type="text" id="searchFeatured" placeholder="Tìm tên bài đăng..." oninput="filterFeaturedSearch()"></div>
-          <button class="btn btn-delete" onclick="deleteAllFeatured()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa tất cả</button>
+          <div class="date-filter-row">
+            <label>Từ:</label><input type="date" id="featuredDateFrom">
+            <label>Đến:</label><input type="date" id="featuredDateTo">
+            <button class="btn btn-date-filter" onclick="applyDateFilter('featured')">Lọc</button>
+            <button class="btn btn-date-clear" onclick="clearDateFilter('featured')">Xóa lọc</button>
+          </div>
+          <button class="btn btn-delete" onclick="deleteSelectedFeatured()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa đã chọn</button>
         </div>
         <div class="result-info" id="featuredResultInfo"></div>
         <div class="card">
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Bài đăng</th><th>Gói</th><th>Thanh toán</th><th>Trạng thái</th><th style="text-align:right">Thao tác</th></tr></thead>
+              <thead><tr><th style="width:40px;text-align:center"><input type="checkbox" id="selectAllFeatured" onchange="toggleSelectAllFeatured(this.checked)"></th><th>Bài đăng</th><th>Gói</th><th>Thanh toán</th><th>Trạng thái</th><th style="text-align:right">Thao tác</th></tr></thead>
               <tbody id="featuredTableBody"><tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr></tbody>
             </table>
           </div>
@@ -2524,13 +2530,19 @@ tbody tr:hover td {
             <button class="tab-btn" data-filter="featured">Đẩy nổi bật</button>
           </div>
           <div class="search-box"><i class="fas fa-search"></i><input type="text" id="searchPayments" placeholder="Tìm UID, mã GD..." oninput="filterPaymentsSearch()"></div>
-          <button class="btn btn-delete" onclick="deleteAllPayments()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa tất cả</button>
+          <div class="date-filter-row">
+            <label>Từ:</label><input type="date" id="paymentsDateFrom">
+            <label>Đến:</label><input type="date" id="paymentsDateTo">
+            <button class="btn btn-date-filter" onclick="applyDateFilter('payments')">Lọc</button>
+            <button class="btn btn-date-clear" onclick="clearDateFilter('payments')">Xóa lọc</button>
+          </div>
+          <button class="btn btn-delete" onclick="deleteSelectedPayments()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa đã chọn</button>
         </div>
         <div class="result-info" id="paymentsResultInfo"></div>
         <div class="card">
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Dịch vụ</th><th>Người dùng</th><th>Số tiền</th><th>Thời gian</th><th>Trạng thái</th></tr></thead>
+              <thead><tr><th style="width:40px;text-align:center"><input type="checkbox" id="selectAllPayments" onchange="toggleSelectAllPayments(this.checked)"></th><th>Dịch vụ</th><th>Người dùng</th><th>Số tiền</th><th>Thời gian</th><th>Trạng thái</th><th style="text-align:right">Thao tác</th></tr></thead>
               <tbody id="paymentsTableBody"><tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr></tbody>
             </table>
           </div>
@@ -2555,13 +2567,19 @@ tbody tr:hover td {
             <option value="2">2 sao</option>
             <option value="1">1 sao</option>
           </select>
-          <button class="btn btn-delete" onclick="deleteAllReviews()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa tất cả</button>
+          <div class="date-filter-row">
+            <label>Từ:</label><input type="date" id="reviewsDateFrom">
+            <label>Đến:</label><input type="date" id="reviewsDateTo">
+            <button class="btn btn-date-filter" onclick="applyDateFilter('reviews')">Lọc</button>
+            <button class="btn btn-date-clear" onclick="clearDateFilter('reviews')">Xóa lọc</button>
+          </div>
+          <button class="btn btn-delete" onclick="deleteSelectedReviews()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa đã chọn</button>
         </div>
         <div class="result-info" id="reviewsResultInfo"></div>
         <div class="card">
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Đánh giá</th><th>Phòng</th><th>Người đánh giá</th><th>Ngày tạo</th><th style="text-align:right">Thao tác</th></tr></thead>
+              <thead><tr><th style="width:40px;text-align:center"><input type="checkbox" id="selectAllReviews" onchange="toggleSelectAllReviews(this.checked)"></th><th>Đánh giá</th><th>Phòng</th><th>Người đánh giá</th><th>Ngày tạo</th><th style="text-align:right">Thao tác</th></tr></thead>
               <tbody id="reviewsTableBody"><tr><td colspan="5"><div class="empty-state">Đang tải...</div></td></tr></tbody>
             </table>
           </div>
@@ -2583,13 +2601,19 @@ tbody tr:hover td {
           <select class="filter-select" id="filterSupportCategory" onchange="filterSupportByCategory()">
             <option value="">Tất cả loại</option>
           </select>
-          <button class="btn btn-delete" onclick="deleteAllSupport()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa tất cả</button>
+          <div class="date-filter-row">
+            <label>Từ:</label><input type="date" id="supportDateFrom">
+            <label>Đến:</label><input type="date" id="supportDateTo">
+            <button class="btn btn-date-filter" onclick="applyDateFilter('support')">Lọc</button>
+            <button class="btn btn-date-clear" onclick="clearDateFilter('support')">Xóa lọc</button>
+          </div>
+          <button class="btn btn-delete" onclick="deleteSelectedSupport()" style="white-space:nowrap"><i class="fas fa-trash"></i> Xóa đã chọn</button>
         </div>
         <div class="result-info" id="supportResultInfo"></div>
         <div class="card">
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Người gửi</th><th>Loại vấn đề</th><th>Tiêu đề</th><th>Tin cuối</th><th>Cập nhật</th><th>Trạng thái</th><th style="text-align:right">Thao tác</th></tr></thead>
+              <thead><tr><th style="width:40px;text-align:center"><input type="checkbox" id="selectAllSupport" onchange="toggleSelectAllSupport(this.checked)"></th><th>Người gửi</th><th>Loại vấn đề</th><th>Tiêu đề</th><th>Tin cuối</th><th>Cập nhật</th><th>Trạng thái</th><th style="text-align:right">Thao tác</th></tr></thead>
               <tbody id="supportTableBody"><tr><td colspan="7"><div class="empty-state">Đang tải...</div></td></tr></tbody>
             </table>
           </div>
