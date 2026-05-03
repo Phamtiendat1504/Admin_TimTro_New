@@ -1,6 +1,7 @@
   const { setGlobalOptions } = require("firebase-functions");
 const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { onRequest } = require("firebase-functions/v2/https");
+const { onCall } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const admin = require("firebase-admin");
 const cors = require("cors")({ origin: true });
@@ -9,6 +10,71 @@ const vision = require("@google-cloud/vision");
 setGlobalOptions({ maxInstances: 10 });
 admin.initializeApp();
 const visionClient = new vision.ImageAnnotatorClient();
+
+let cachedStats = null;
+let lastStatsFetchTime = 0;
+
+exports.getDashboardStats = onCall({ cors: true, maxInstances: 2 }, async (request) => {
+  const now = Date.now();
+  // Cache kết quả 5 phút (300,000 ms) để giảm 99% chi phí Read khi Admin F5 trang liên tục
+  if (cachedStats && (now - lastStatsFetchTime < 300000)) {
+    return cachedStats;
+  }
+
+  const db = admin.firestore();
+  
+  // Tối ưu hóa: Dùng .count() API của Firebase Admin để lấy tổng số cực rẻ (1 Read) thay vì tải toàn bộ
+  const [totalUsersSnap, totalRoomsSnap] = await Promise.all([
+    db.collection('users').count().get(),
+    db.collection('rooms').count().get()
+  ]);
+
+  // Kéo toàn bộ data để vẽ Chart (vẫn tốn Read nhưng được Cache 5 phút ở server, tránh sập Frontend)
+  const [allUsersSnap, allRoomsSnap] = await Promise.all([
+    db.collection('users').get(),
+    db.collection('rooms').get()
+  ]);
+
+  const userDocs = allUsersSnap.docs.map(d => d.data());
+  const roomDocs = allRoomsSnap.docs.map(d => d.data());
+
+  const userGroups = { standard: 0, verified: 0, admin: 0 };
+  userDocs.forEach(d => {
+    if (d.role === 'admin') userGroups.admin++;
+    else if (d.isVerified === true) userGroups.verified++;
+    else userGroups.standard++;
+  });
+
+  const monthNames = ["Tháng 1", "Tháng 2", "Tháng 3", "Tháng 4", "Tháng 5", "Tháng 6", "Tháng 7", "Tháng 8", "Tháng 9", "Tháng 10", "Tháng 11", "Tháng 12"];
+  const last6Months = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date();
+    d.setMonth(d.getMonth() - i);
+    last6Months.push({ month: d.getMonth(), year: d.getFullYear(), label: monthNames[d.getMonth()], count: 0 });
+  }
+
+  roomDocs.forEach(data => {
+    if (!data.createdAt) return;
+    const createdAtMs = typeof data.createdAt === 'number' ? data.createdAt : (data.createdAt.toMillis ? data.createdAt.toMillis() : 0);
+    if (!createdAtMs) return;
+    
+    const d = new Date(createdAtMs);
+    const m = d.getMonth();
+    const y = d.getFullYear();
+    const target = last6Months.find(item => item.month === m && item.year === y);
+    if (target) target.count++;
+  });
+
+  cachedStats = {
+    totalUsers: totalUsersSnap.data().count,
+    totalRooms: totalRoomsSnap.data().count,
+    userGroups,
+    postsChart: last6Months
+  };
+  lastStatsFetchTime = now;
+
+  return cachedStats;
+});
 
 const CLEANUP = {
   notificationRetentionDays: 60,
@@ -1196,3 +1262,46 @@ exports.autoDisableExpiredFeaturedRooms = onSchedule(
     return null;
   }
 );
+
+exports.updatePopularAreasStats = onDocumentWritten("rooms/{roomId}", async (event) => {
+  const beforeData = event.data?.before?.exists ? event.data.before.data() : null;
+  const afterData = event.data?.after?.exists ? event.data.after.data() : null;
+
+  const beforeStatus = beforeData ? beforeData.status : null;
+  const afterStatus = afterData ? afterData.status : null;
+  
+  const beforeDistrict = beforeData ? (beforeData.district || "").trim() : "";
+  const afterDistrict = afterData ? (afterData.district || "").trim() : "";
+
+  // Nếu không có thay đổi liên quan đến status = 'approved' hoặc district, bỏ qua
+  if (beforeStatus !== 'approved' && afterStatus !== 'approved') return null;
+  if (beforeStatus === 'approved' && afterStatus === 'approved' && beforeDistrict === afterDistrict) return null;
+
+  const db = admin.firestore();
+  
+  // Do không muốn dùng transaction đếm (+1 / -1) thủ công phức tạp (dễ sai lệch nếu sửa tay data),
+  // và trigger chỉ chạy khi có thay đổi status/district, ta có thể dùng hàm aggregation .count() 
+  // kết hợp query nhanh để xây dựng lại danh sách popular areas (Cloud Function chạy ẩn không tốn data transfer về client).
+  
+  const allApprovedSnap = await db.collection("rooms").where("status", "==", "approved").get();
+  
+  const districtCount = {};
+  const districtDisplay = {};
+
+  allApprovedSnap.docs.forEach(doc => {
+    const rawDistrict = doc.data().district || "";
+    const district = rawDistrict.trim().replace(/\s+/g, " ");
+    if (!district) return;
+    
+    const key = district.toLowerCase();
+    districtCount[key] = (districtCount[key] || 0) + 1;
+    if (!districtDisplay[key]) districtDisplay[key] = district;
+  });
+
+  const popularAreas = Object.keys(districtCount)
+    .map(key => ({ district: districtDisplay[key], count: districtCount[key] }))
+    .sort((a, b) => b.count - a.count);
+
+  await db.collection("stats").doc("popular_areas").set({ areas: popularAreas, updatedAt: Date.now() });
+  return null;
+});

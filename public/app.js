@@ -505,8 +505,8 @@ function startRealtimeListeners() {
   checkAndUnlockExpiredUsers();
 
   activeListeners.push(
-    db.collection('users').onSnapshot(snap => {
-      document.getElementById('statUsers').textContent = snap.size;
+    db.collection('users').orderBy('createdAt', 'desc').limit(1).onSnapshot(() => {
+      // NOTE: Tự động refresh danh sách Users khi có thay đổi mới nhất (giới hạn 1 doc để tiết kiệm Read)
       if (document.getElementById('pageUsers').classList.contains('active')) {
         if (usersRealtimeRefreshTimer) clearTimeout(usersRealtimeRefreshTimer);
         usersRealtimeRefreshTimer = setTimeout(() => {
@@ -521,33 +521,36 @@ function startRealtimeListeners() {
       usersRealtimeRefreshTimer = null;
     }
   });
+
   activeListeners.push(
-    db.collection('rooms').onSnapshot(snap => {
-      document.getElementById('statPosts').textContent = snap.size;
-      const p = snap.docs.filter(d => d.data().status === 'pending').length;
+    db.collection('rooms').where('status', '==', 'pending').onSnapshot(snap => {
+      const p = snap.size;
       document.getElementById('statPending').textContent = p;
       setBadge('badgePosts', p);
     })
   );
+
   activeListeners.push(
-    db.collection('verifications').onSnapshot(snap => {
-      const pendingLike = snap.docs.filter(doc => shouldShowInAdminVerificationQueue(doc.data()));
-      document.getElementById('statVerify').textContent = pendingLike.length;
-      setBadge('badgeVerify', pendingLike.length);
+    db.collection('verifications').where('status', '==', 'pending').onSnapshot(snap => {
+      const p = snap.size;
+      document.getElementById('statVerify').textContent = p;
+      setBadge('badgeVerify', p);
     })
   );
+
   activeListeners.push(
-    db.collection('support_tickets').onSnapshot(snap => {
-      const unread = snap.docs.filter(d => d.data().unreadForAdmin === true).length;
+    db.collection('support_tickets').where('unreadForAdmin', '==', true).onSnapshot(snap => {
+      const unread = snap.size;
       setBadge('badgeSupport', unread);
       if (document.getElementById('pageSupport')?.classList.contains('active')) {
         loadSupportTickets(getActiveTab('supportTabGroup'));
       }
     })
   );
+
   activeListeners.push(
-    db.collection('featured_upgrade_requests').onSnapshot(snap => {
-      const pending = snap.docs.filter(d => ['paid', 'paid_waiting_admin'].includes(d.data().status)).length;
+    db.collection('featured_upgrade_requests').where('status', 'in', ['paid', 'paid_waiting_admin']).onSnapshot(snap => {
+      const pending = snap.size;
       setBadge('badgeFeatured', pending);
       if (document.getElementById('pageFeatured')?.classList.contains('active')) {
         loadFeaturedRequests(getActiveTab('featuredTabGroup'));
@@ -575,16 +578,24 @@ function setBadge(id, count) {
 // ════════════════════════════════════════
 async function loadDashboard() {
   try {
-    const [postsSnap, usersSnap, allPostsSnap, allUsersSnap] = await Promise.all([
+    // Kéo dữ liệu thống kê từ Cloud Function thay vì kéo toàn bộ collections
+    const getDashboardStats = firebase.functions().httpsCallable('getDashboardStats');
+    
+    // Vẫn kéo 5 bài đăng và 5 user mới nhất cho phần list (giới hạn 5 docs, chi phí rất thấp)
+    const [postsSnap, usersSnap, statsRes] = await Promise.all([
       db.collection('rooms').where('status', '==', 'pending').orderBy('createdAt', 'desc').limit(5).get(),
       db.collection('users').orderBy('createdAt', 'desc').limit(5).get(),
-      db.collection('rooms').get(),
-      db.collection('users').get()
+      getDashboardStats()
     ]);
 
-    dashboardAllPostDocs = allPostsSnap.docs || [];
-    dashboardAllUserDocs = allUsersSnap.docs || [];
-    renderDashboardCharts(dashboardAllPostDocs, dashboardAllUserDocs);
+    const stats = statsRes.data;
+    
+    // Cập nhật tổng số (kể cả không có listener realtime)
+    document.getElementById('statUsers').textContent = stats.totalUsers || 0;
+    document.getElementById('statPosts').textContent = stats.totalRooms || 0;
+
+    // Render Charts trực tiếp từ dữ liệu đã aggregate ở server
+    renderAggregatedCharts(stats.postsChart, stats.userGroups);
 
     const postsEl = document.getElementById('dashRecentPosts');
     if (postsSnap.empty) {
@@ -630,59 +641,17 @@ async function loadDashboard() {
     }
   } catch (e) {
     console.error(e);
-    showToast('error', 'Lỗi', 'Không thể tải dữ liệu tổng quan');
+    showToast('error', 'Lỗi', 'Không thể tải dữ liệu tổng quan: ' + e.message);
   }
 }
 
-function filterPostDocsByDate(postDocs, dateFromValue, dateToValue) {
-  if (!dateFromValue && !dateToValue) return postDocs;
-
-  const fromMs = dateFromValue ? new Date(`${dateFromValue}T00:00:00`).getTime() : 0;
-  const toMs = dateToValue ? new Date(`${dateToValue}T23:59:59.999`).getTime() : Number.MAX_SAFE_INTEGER;
-  if (Number.isNaN(fromMs) || Number.isNaN(toMs)) return postDocs;
-
-  return postDocs.filter(doc => {
-    const createdAt = toEpochMs(doc.data()?.createdAt);
-    return createdAt >= fromMs && createdAt <= toMs;
-  });
-}
-
+// Bỏ hàm lọc theo ngày ở client, tính năng này tạm vô hiệu hóa hoặc cần Cloud Function hỗ trợ nếu cần
 window.updatePostChartByDate = function() {
-  const fromInput = document.getElementById('chartDateFrom');
-  const toInput = document.getElementById('chartDateTo');
-  const fromValue = fromInput?.value || '';
-  const toValue = toInput?.value || '';
-
-  if (fromValue && toValue && fromValue > toValue) {
-    showToast('warning', 'Khoảng ngày chưa hợp lệ', 'Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc.');
-    return;
-  }
-
-  const filteredPostDocs = filterPostDocsByDate(dashboardAllPostDocs, fromValue, toValue);
-  renderDashboardCharts(filteredPostDocs, dashboardAllUserDocs);
+  showToast('info', 'Thông báo', 'Tính năng lọc biểu đồ theo ngày tạm thời bị vô hiệu hóa để tối ưu hóa hiệu suất hệ thống.');
 };
 
-// Render charts for dashboard.
-function renderDashboardCharts(postDocs, userDocs) {
-  // 1. Posts Chart (6 tháng gần nhất)
-  const monthNames = ["Tháng 1", "Tháng 2", "Tháng 3", "Tháng 4", "Tháng 5", "Tháng 6", "Tháng 7", "Tháng 8", "Tháng 9", "Tháng 10", "Tháng 11", "Tháng 12"];
-  const last6Months = [];
-  for (let i = 5; i >= 0; i--) {
-    const d = new Date();
-    d.setMonth(d.getMonth() - i);
-    last6Months.push({ month: d.getMonth(), year: d.getFullYear(), label: monthNames[d.getMonth()], count: 0 });
-  }
-
-  postDocs.forEach(doc => {
-    const data = doc.data();
-    if (!data.createdAt) return;
-    const d = new Date(toEpochMs(data.createdAt));
-    const m = d.getMonth();
-    const y = d.getFullYear();
-    const target = last6Months.find(item => item.month === m && item.year === y);
-    if (target) target.count++;
-  });
-
+// Render charts từ aggregated data
+function renderAggregatedCharts(last6Months, userGroups) {
   const postsCtx = document.getElementById('postsChart').getContext('2d');
   if (postsChartInstance) postsChartInstance.destroy();
   // Create gradient fill for area chart
