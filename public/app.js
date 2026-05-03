@@ -651,7 +651,7 @@ window.updatePostChartByDate = function() {
 };
 
 // Render charts từ aggregated data
-function renderAggregatedCharts(last6Months, userGroups) {
+function renderAggregatedCharts(last6Months, userGroupsParams) {
   const postsCtx = document.getElementById('postsChart').getContext('2d');
   if (postsChartInstance) postsChartInstance.destroy();
   // Create gradient fill for area chart
@@ -713,19 +713,7 @@ function renderAggregatedCharts(last6Months, userGroups) {
     }
   });
 
-  // 2. Users Pie Chart - phân loại theo isVerified (không cần theo role tenant/landlord)
-  const userGroups = { standard: 0, verified: 0, admin: 0 };
-  userDocs.forEach(doc => {
-    const d = doc.data();
-    if (d.role === 'admin') {
-      userGroups.admin++;
-    } else if (d.isVerified === true) {
-      userGroups.verified++;
-    } else {
-      userGroups.standard++;
-    }
-  });
-
+  // 2. Users Pie Chart - Sử dụng luôn dữ liệu từ parameter
   const usersCtx = document.getElementById('usersChart').getContext('2d');
   if (usersChartInstance) usersChartInstance.destroy();
   usersChartInstance = new Chart(usersCtx, {
@@ -733,7 +721,7 @@ function renderAggregatedCharts(last6Months, userGroups) {
     data: {
       labels: ['Thành viên tiêu chuẩn', 'Đã xác minh', 'Admin'],
       datasets: [{
-        data: [userGroups.standard, userGroups.verified, userGroups.admin],
+        data: [userGroupsParams.standard, userGroupsParams.verified, userGroupsParams.admin],
         backgroundColor: ['#60a5fa', '#34d399', '#f59e0b'],
         borderWidth: 0,
         hoverOffset: 10
