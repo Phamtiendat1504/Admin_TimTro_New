@@ -1,5 +1,7 @@
 {
   "projects": {
     "default": "doantotnghiep-b39ae"
-  }
+  },
+  "targets": {},
+  "etags": {}
 }

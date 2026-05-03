@@ -112,6 +112,7 @@ service cloud.firestore {
       );
 
       allow delete: if isAdmin();
+
     }
 
     // ROOMS

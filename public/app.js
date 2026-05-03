@@ -1,4 +1,4 @@
-﻿// =======================================
+// =======================================
 // FIREBASE CONFIG
 // firebase deploy --only hosting
 // =======================================
@@ -19,6 +19,8 @@ const storage = firebase.storage();
 // ?? CHARTS INSTANCES ??
 let postsChartInstance = null;
 let usersChartInstance = null;
+let dashboardAllPostDocs = [];
+let dashboardAllUserDocs = [];
 
 // ════════════════════════════════════════
 // HELPERS
@@ -580,7 +582,9 @@ async function loadDashboard() {
       db.collection('users').get()
     ]);
 
-    renderDashboardCharts(allPostsSnap.docs, allUsersSnap.docs);
+    dashboardAllPostDocs = allPostsSnap.docs || [];
+    dashboardAllUserDocs = allUsersSnap.docs || [];
+    renderDashboardCharts(dashboardAllPostDocs, dashboardAllUserDocs);
 
     const postsEl = document.getElementById('dashRecentPosts');
     if (postsSnap.empty) {
@@ -630,7 +634,35 @@ async function loadDashboard() {
   }
 }
 
-// ?? RENDER CHARTS ??
+function filterPostDocsByDate(postDocs, dateFromValue, dateToValue) {
+  if (!dateFromValue && !dateToValue) return postDocs;
+
+  const fromMs = dateFromValue ? new Date(`${dateFromValue}T00:00:00`).getTime() : 0;
+  const toMs = dateToValue ? new Date(`${dateToValue}T23:59:59.999`).getTime() : Number.MAX_SAFE_INTEGER;
+  if (Number.isNaN(fromMs) || Number.isNaN(toMs)) return postDocs;
+
+  return postDocs.filter(doc => {
+    const createdAt = toEpochMs(doc.data()?.createdAt);
+    return createdAt >= fromMs && createdAt <= toMs;
+  });
+}
+
+window.updatePostChartByDate = function() {
+  const fromInput = document.getElementById('chartDateFrom');
+  const toInput = document.getElementById('chartDateTo');
+  const fromValue = fromInput?.value || '';
+  const toValue = toInput?.value || '';
+
+  if (fromValue && toValue && fromValue > toValue) {
+    showToast('warning', 'Khoảng ngày chưa hợp lệ', 'Ngày bắt đầu phải nhỏ hơn hoặc bằng ngày kết thúc.');
+    return;
+  }
+
+  const filteredPostDocs = filterPostDocsByDate(dashboardAllPostDocs, fromValue, toValue);
+  renderDashboardCharts(filteredPostDocs, dashboardAllUserDocs);
+};
+
+// Render charts for dashboard.
 function renderDashboardCharts(postDocs, userDocs) {
   // 1. Posts Chart (6 tháng gần nhất)
   const monthNames = ["Tháng 1", "Tháng 2", "Tháng 3", "Tháng 4", "Tháng 5", "Tháng 6", "Tháng 7", "Tháng 8", "Tháng 9", "Tháng 10", "Tháng 11", "Tháng 12"];
@@ -655,9 +687,9 @@ function renderDashboardCharts(postDocs, userDocs) {
   if (postsChartInstance) postsChartInstance.destroy();
   // Create gradient fill for area chart
   const lineGrad = postsCtx.createLinearGradient(0, 0, 0, 300);
-  lineGrad.addColorStop(0, 'rgba(0, 255, 255, 0.5)');
-  lineGrad.addColorStop(0.6, 'rgba(99, 102, 241, 0.08)');
-  lineGrad.addColorStop(1, 'rgba(99, 102, 241, 0)');
+  lineGrad.addColorStop(0, 'rgba(37, 99, 235, 0.32)');
+  lineGrad.addColorStop(0.62, 'rgba(37, 99, 235, 0.12)');
+  lineGrad.addColorStop(1, 'rgba(37, 99, 235, 0)');
   postsChartInstance = new Chart(postsCtx, {
     type: 'line',
     data: {
@@ -665,17 +697,17 @@ function renderDashboardCharts(postDocs, userDocs) {
       datasets: [{
         label: 'Bài đăng mới',
         data: last6Months.map(i => i.count),
-        borderColor: '#00ffff',
+        borderColor: '#2563eb',
         borderWidth: 2.5,
         backgroundColor: lineGrad,
         fill: true,
         tension: 0.45,
-        pointBackgroundColor: '#6366f1',
+        pointBackgroundColor: '#2563eb',
         pointBorderColor: '#ffffff',
         pointBorderWidth: 2,
         pointRadius: 5,
         pointHoverRadius: 8,
-        pointHoverBackgroundColor: '#6366f1',
+        pointHoverBackgroundColor: '#1d4ed8',
         pointHoverBorderColor: '#ffffff',
         pointHoverBorderWidth: 3
       }]
@@ -733,7 +765,7 @@ function renderDashboardCharts(postDocs, userDocs) {
       labels: ['Thành viên tiêu chuẩn', 'Đã xác minh', 'Admin'],
       datasets: [{
         data: [userGroups.standard, userGroups.verified, userGroups.admin],
-        backgroundColor: ['#00ffff', '#ff00ff', '#7000ff'],
+        backgroundColor: ['#60a5fa', '#34d399', '#f59e0b'],
         borderWidth: 0,
         hoverOffset: 10
       }]
@@ -1216,8 +1248,8 @@ async function loadPayments(filter) {
     if (filter === 'all' || filter === 'featured') tasks.push(db.collection('featured_upgrade_requests').orderBy('createdAt', 'desc').limit(200).get());
     const snaps = await Promise.all(tasks);
     const docs = [];
-    snaps.forEach(snap => snap.docs.forEach(doc => docs.push({ id: doc.id, type: doc.ref.parent.id === 'featured_upgrade_requests' ? 'featured' : 'slot', data: doc.data() })));
-    state.payments.docs = docs.sort((a,b) => (b.data.createdAt || 0) - (a.data.createdAt || 0));
+    snaps.forEach(snap => snap.docs.forEach(doc => docs.push({ docId: doc.id, type: doc.ref.parent.id === 'featured_upgrade_requests' ? 'featured' : 'slot', data: doc.data() })));
+    state.payments.docs = docs.sort((a,b) => toEpochMs(b.data.createdAt) - toEpochMs(a.data.createdAt));
     state.payments.page = 1;
     renderPayments();
   } catch (e) {
@@ -1266,9 +1298,9 @@ function renderPayments() {
       <td><div class="td-name">${item.type === 'featured' ? 'Đẩy nổi bật' : 'Mua lượt đăng'}</div><div class="td-email">${escapeHtml(d.label || d.code || '')}</div></td>
       <td><div class="td-email">${escapeHtml(d.uid || '')}</div>${d.roomTitle ? `<div class="td-email">${escapeHtml(d.roomTitle)}</div>` : ''}</td>
       <td><b>${fmt(d.amount || 0)} đ</b><div class="td-email">${escapeHtml(d.transferNote || '')}</div></td>
-      <td>${fmtDateTime(d.paidAt || d.createdAt)}</td>
+      <td>${fmtDateTime(d.paidAt || d.updatedAt || d.createdAt)}</td>
       <td><span class="badge ${paymentStatusBadge(status, item.type)}">${paymentStatusText(status, item.type)}</span></td>
-      <td style="text-align:right">${canDelete ? `<button class="btn btn-delete" onclick="deletePaymentRecord('${item.id}','${item.type}')"><i class="fas fa-trash"></i></button>` : ''}</td>
+      <td style="text-align:right">${canDelete ? `<button class="btn btn-delete" onclick="deletePaymentRecord('${docId}','${item.type}')"><i class="fas fa-trash"></i></button>` : ''}</td>
     </tr>`;
   }).join('');
 }
@@ -1364,7 +1396,7 @@ async function deleteSelectedPayments() {
   for (const item of items) {
     try {
       const col = item.type === 'featured' ? 'featured_upgrade_requests' : 'slot_upgrade_requests';
-      await db.collection(col).doc(item.id).delete();
+      await db.collection(col).doc(item.docId).delete();
     } catch (e) { failed++; }
   }
   if (failed === 0) showToast('success', 'Thành công', `Đã xóa ${items.length} giao dịch.`);
@@ -1875,7 +1907,8 @@ function renderUserActivityStatus(d) {
 
   const lastSeenMs = toEpochMs(d.lastSeen);
   const isOnline = d.isOnline === true;
-  const ONLINE_STALE_TIMEOUT_MS = 90 * 1000;
+  // Heartbeat Android cập nhật mỗi 60 giây → đặt ngưỡng 3 phút để tránh nhấp nháy Online/Offline
+  const ONLINE_STALE_TIMEOUT_MS = 3 * 60 * 1000;
   const consideredOnline = isOnline && (!lastSeenMs || (Date.now() - lastSeenMs) <= ONLINE_STALE_TIMEOUT_MS);
 
   if (consideredOnline) {

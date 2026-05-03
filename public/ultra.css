@@ -582,3 +582,24 @@ canvas#ultraCanvas {
     align-items: stretch !important;
   }
 }
+
+/* Reduce visual noise from excessive icons for a more professional UI */
+.btn i,
+.btn-view i,
+.btn-delete i,
+.btn-export i,
+.btn-date-filter i,
+.btn-date-clear i {
+  display: none !important;
+}
+
+#pageDashboard .stat-icon,
+#pageDashboard .card-title-icon,
+#pageDashboard .list-avatar,
+#pageDashboard .empty-state i {
+  display: none !important;
+}
+
+#pageDashboard .stat-head {
+  justify-content: flex-end !important;
+}
