@@ -1,38 +1,70 @@
-  const { setGlobalOptions } = require("firebase-functions");
-const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
-const { onRequest } = require("firebase-functions/v2/https");
-const { onCall } = require("firebase-functions/v2/https");
+const { setGlobalOptions } = require("firebase-functions");
+const { onDocumentCreated, onDocumentWritten, onDocumentDeleted } = require("firebase-functions/v2/firestore");
+const { onRequest, onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
+const functionsV1 = require("firebase-functions/v1");
 const admin = require("firebase-admin");
 const cors = require("cors")({ origin: true });
-const vision = require("@google-cloud/vision");
 
-setGlobalOptions({ maxInstances: 10 });
+setGlobalOptions({ maxInstances: 10, region: "asia-southeast1" });
 admin.initializeApp();
-const visionClient = new vision.ImageAnnotatorClient();
 
-let cachedStats = null;
-let lastStatsFetchTime = 0;
+const cachedAdmins = new Map();
+const ADMIN_CACHE_TTL = 60000;
+const ADMIN_CACHE_MAX = 50;
 
 exports.getDashboardStats = onCall({ cors: true, maxInstances: 2 }, async (request) => {
+  // H5: Admin authorization check
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Yêu cầu đăng nhập');
+  }
+  
+  const callerUid = request.auth.uid;
   const now = Date.now();
-  // Cache kết quả 5 phút (300,000 ms) để giảm 99% chi phí Read khi Admin F5 trang liên tục
-  if (cachedStats && (now - lastStatsFetchTime < 300000)) {
-    return cachedStats;
+  
+  let isCallerAdmin = false;
+  if (cachedAdmins.has(callerUid) && (now - cachedAdmins.get(callerUid) < ADMIN_CACHE_TTL)) {
+    isCallerAdmin = true;
+  } else {
+    const callerDoc = await admin.firestore().collection('users').doc(callerUid).get();
+    if (callerDoc.exists && callerDoc.data()?.role === 'admin') {
+      isCallerAdmin = true;
+      if (cachedAdmins.size >= ADMIN_CACHE_MAX) cachedAdmins.clear();
+      cachedAdmins.set(callerUid, now);
+    }
+  }
+
+  if (!isCallerAdmin) {
+    throw new HttpsError('permission-denied', 'Chỉ admin mới có quyền xem thống kê');
   }
 
   const db = admin.firestore();
   
+  // Read shared cached stats from Firestore (resolves H2 multi-instance cache sharing)
+  let statsDoc = null;
+  try {
+    statsDoc = await db.collection('stats').doc('dashboard_stats').get();
+  } catch (e) {
+    console.warn("Lỗi đọc cache stats từ Firestore, sẽ tính toán lại:", e.message);
+  }
+
+  if (statsDoc && statsDoc.exists) {
+    const data = statsDoc.data();
+    if (data && data.updatedAt && (now - data.updatedAt < 300000)) {
+      return data.stats;
+    }
+  }
+
   // Tối ưu hóa: Dùng .count() API của Firebase Admin để lấy tổng số cực rẻ (1 Read) thay vì tải toàn bộ
   const [totalUsersSnap, totalRoomsSnap] = await Promise.all([
     db.collection('users').count().get(),
     db.collection('rooms').count().get()
   ]);
 
-  // Kéo toàn bộ data để vẽ Chart (vẫn tốn Read nhưng được Cache 5 phút ở server, tránh sập Frontend)
+  // Kéo data để vẽ Chart (Sử dụng .select để tránh lỗi OOM do tràn RAM khi dữ liệu lớn)
   const [allUsersSnap, allRoomsSnap] = await Promise.all([
-    db.collection('users').get(),
-    db.collection('rooms').get()
+    db.collection('users').select('role', 'isVerified').get(),
+    db.collection('rooms').select('createdAt').get()
   ]);
 
   const userDocs = allUsersSnap.docs.map(d => d.data());
@@ -55,7 +87,18 @@ exports.getDashboardStats = onCall({ cors: true, maxInstances: 2 }, async (reque
 
   roomDocs.forEach(data => {
     if (!data.createdAt) return;
-    const createdAtMs = typeof data.createdAt === 'number' ? data.createdAt : (data.createdAt.toMillis ? data.createdAt.toMillis() : 0);
+    
+    let createdAtMs = 0;
+    if (typeof data.createdAt === 'number') {
+      createdAtMs = data.createdAt;
+    } else if (data.createdAt && typeof data.createdAt.toMillis === 'function') {
+      createdAtMs = data.createdAt.toMillis();
+    } else if (data.createdAt instanceof Date) {
+      createdAtMs = data.createdAt.getTime();
+    } else {
+      return; 
+    }
+    
     if (!createdAtMs) return;
     
     const d = new Date(createdAtMs);
@@ -65,579 +108,23 @@ exports.getDashboardStats = onCall({ cors: true, maxInstances: 2 }, async (reque
     if (target) target.count++;
   });
 
-  cachedStats = {
+  const newStats = {
     totalUsers: totalUsersSnap.data().count,
     totalRooms: totalRoomsSnap.data().count,
     userGroups,
     postsChart: last6Months
   };
-  lastStatsFetchTime = now;
 
-  return cachedStats;
-});
-
-const CLEANUP = {
-  notificationRetentionDays: 60,
-  verificationRetentionDays: 180, // only non-pending docs
-  systemNotificationRetentionDays: 30,
-  maxDocsPerRun: 400,
-  maxFilesPerPrefixPerRun: 1200,
-};
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-const VERIFICATION_REVIEWER_ID = "system_auto_vision";
-const AUTO_FAIL_THRESHOLD = 3;
-const OCR_FAIL_COUNTERS_COLLECTION = "verification_counters";
-const VN_TIMEZONE = "Asia/Ho_Chi_Minh";
-
-const CCCD_FRONT_KEYWORDS = [
-  "CAN CUOC",
-  "CAN CUOC CONG DAN",
-  "SOCIALIST REPUBLIC OF VIET NAM",
-  "IDENTITY CARD",
-  "HO VA TEN",
-  "DATE OF BIRTH",
-  "GIOI TINH",
-  "QUOC TICH",
-];
-
-const CCCD_BACK_KEYWORDS = [
-  "DAC DIEM NHAN DANG",
-  "NGAY CAP",
-  "NOI CAP",
-  "CO GIA TRI DEN",
-];
-
-function normalizeDigits(raw) {
-  return String(raw || "").replace(/\D/g, "");
-}
-
-function normalizeNoAccentUpper(raw) {
-  return String(raw || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toUpperCase()
-    .replace(/Đ/g, "D");
-}
-
-function analyzeSideSignals(text) {
-  const normalized = normalizeNoAccentUpper(text);
-  const frontScore = CCCD_FRONT_KEYWORDS.filter((k) => normalized.includes(k)).length;
-  const backScore = CCCD_BACK_KEYWORDS.filter((k) => normalized.includes(k)).length;
-  const hasMrz = /[A-Z0-9<]{20,}/.test(normalized) || (normalized.match(/</g) || []).length >= 8;
-  return { frontScore, backScore, hasMrz };
-}
-
-function isFrontSide(signals) {
-  return signals.frontScore >= 2 && !signals.hasMrz && signals.frontScore >= signals.backScore;
-}
-
-function isBackSide(signals) {
-  const hasBackSignal = signals.backScore >= 1 || signals.hasMrz;
-  return hasBackSignal && (signals.hasMrz || signals.backScore >= signals.frontScore);
-}
-
-function extractCccdCandidates(text) {
-  if (!text) return [];
-
-  const direct = (String(text).match(/\b\d{12}\b/g) || []).map((v) => v.trim());
-  const flexible = Array.from(String(text).matchAll(/(?:\d[\s.\-]*){12}/g))
-    .map((m) => normalizeDigits(m[0]))
-    .filter((v) => v.length === 12);
-
-  const merged = [...direct, ...flexible];
-  if (merged.length > 0) return [...new Set(merged)];
-
-  const allDigits = normalizeDigits(text);
-  if (allDigits.length < 12) return [];
-
-  const windows = [];
-  for (let i = 0; i <= allDigits.length - 12; i += 1) {
-    windows.push(allDigits.substring(i, i + 12));
-  }
-  return [...new Set(windows)];
-}
-
-function getDateKeyInTimeZone(timeZone) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
-
-async function increaseCloudFailCounter(db, uid) {
-  const ref = db.collection(OCR_FAIL_COUNTERS_COLLECTION).doc(uid);
-  const now = Date.now();
-  const todayKey = getDateKeyInTimeZone(VN_TIMEZONE);
-
-  return db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const data = snap.data() || {};
-    const currentDateKey = String(data.dateKey || "");
-    const currentFailCount = Number(data.failCount || 0);
-    const nextFailCount = currentDateKey === todayKey ? currentFailCount + 1 : 1;
-
-    tx.set(ref, {
-      dateKey: todayKey,
-      failCount: nextFailCount,
-      updatedAt: now,
-    }, { merge: true });
-
-    return nextFailCount;
-  });
-}
-
-async function resetCloudFailCounter(db, uid) {
-  const ref = db.collection(OCR_FAIL_COUNTERS_COLLECTION).doc(uid);
-  await ref.set({
-    dateKey: getDateKeyInTimeZone(VN_TIMEZONE),
-    failCount: 0,
-    updatedAt: Date.now(),
-  }, { merge: true });
-}
-
-async function readVisionTextFromUrl(imageUrl) {
-  const [result] = await visionClient.textDetection({
-    image: { source: { imageUri: imageUrl } },
-  });
-  return result?.fullTextAnnotation?.text || "";
-}
-
-function isNameMatched(visionText, expectedName) {
-  if (!expectedName) return true;
-  const normalizedVision = normalizeNoAccentUpper(visionText);
-  const normalizedExpected = normalizeNoAccentUpper(expectedName);
-  
-  if (normalizedVision.includes(normalizedExpected)) return true;
-  
-  const expectedWords = normalizedExpected.split(/\s+/).filter(Boolean);
-  if (expectedWords.length === 0) return true;
-  
-  let currentIndex = 0;
-  for (const word of expectedWords) {
-    const foundIndex = normalizedVision.indexOf(word, currentIndex);
-    if (foundIndex === -1) return false;
-    currentIndex = foundIndex + word.length;
-  }
-  return true;
-}
-
-async function detectCccdByCloudVision(frontUrl, backUrl, expectedCccd, expectedFullName) {
-  const [frontText, backText] = await Promise.all([
-    readVisionTextFromUrl(frontUrl),
-    readVisionTextFromUrl(backUrl),
-  ]);
-
-  const frontSignals = analyzeSideSignals(frontText);
-  const backSignals = analyzeSideSignals(backText);
-  if (!isFrontSide(frontSignals) || !isBackSide(backSignals)) {
-    return {
-      passed: false,
-      reason: "Hệ thống không thể nhận diện chính xác cả hai mặt của Căn cước công dân.",
-      recognizedCccd: "",
-    };
-  }
-
-  const candidates = extractCccdCandidates(`${frontText}\n${backText}`);
-  const matched = candidates.find((v) => v === expectedCccd);
-  if (!matched) {
-    if (candidates.length === 0) {
-      return {
-        passed: false,
-        reason: "Hệ thống không thể đọc được số Căn cước công dân 12 chữ số hợp lệ từ ảnh.",
-        recognizedCccd: "",
-      };
-    }
-    return {
-      passed: false,
-      reason: "Hệ thống phát hiện được Căn cước công dân nhưng không khớp với số đã nộp.",
-      recognizedCccd: candidates[0],
-    };
-  }
-
-  if (expectedFullName && !isNameMatched(frontText, expectedFullName)) {
-    return {
-      passed: false,
-      reason: `Số CCCD khớp nhưng Họ và Tên trên thẻ không khớp với tên tài khoản (${expectedFullName}). Vui lòng cập nhật đúng tên thật trên app.`,
-      recognizedCccd: matched,
-    };
-  }
-
-  return {
-    passed: true,
-    reason: "Hệ thống xác thực thành công số Căn cước công dân và Họ Tên đã nộp.",
-    recognizedCccd: matched,
-  };
-}
-
-async function batchDeleteRefs(refs) {
-  if (!refs || refs.length === 0) return 0;
-  const db = admin.firestore();
-  let deleted = 0;
-
-  for (let i = 0; i < refs.length; i += 450) {
-    const chunk = refs.slice(i, i + 450);
-    const batch = db.batch();
-    chunk.forEach((ref) => batch.delete(ref));
-    await batch.commit();
-    deleted += chunk.length;
-  }
-
-  return deleted;
-}
-
-async function cleanupOldNotifications(now) {
-  const db = admin.firestore();
-  const cutoff = now - CLEANUP.notificationRetentionDays * DAY_MS;
-
-  const snap = await db.collection("notifications")
-    .where("createdAt", "<", cutoff)
-    .limit(CLEANUP.maxDocsPerRun)
-    .get();
-
-  const deleted = await batchDeleteRefs(snap.docs.map((d) => d.ref));
-  return { scanned: snap.size, deleted };
-}
-
-async function cleanupOldSystemNotifications(now) {
-  const db = admin.firestore();
-  const cutoff = now - CLEANUP.systemNotificationRetentionDays * DAY_MS;
-
-  const snap = await db.collection("system_notifications")
-    .where("createdAt", "<", cutoff)
-    .limit(CLEANUP.maxDocsPerRun)
-    .get();
-
-  const deleted = await batchDeleteRefs(snap.docs.map((d) => d.ref));
-  return { scanned: snap.size, deleted };
-}
-
-async function cleanupOldVerifications(now) {
-  const db = admin.firestore();
-  const cutoff = now - CLEANUP.verificationRetentionDays * DAY_MS;
-
-  const snap = await db.collection("verifications")
-    .where("createdAt", "<", cutoff)
-    .limit(CLEANUP.maxDocsPerRun)
-    .get();
-
-  const refs = snap.docs
-    .filter((d) => (d.get("status") || "pending") !== "pending")
-    .map((d) => d.ref);
-
-  const deleted = await batchDeleteRefs(refs);
-  return { scanned: snap.size, deleted };
-}
-
-async function cleanupOrphanSavedPosts() {
-  const db = admin.firestore();
-  const snap = await db.collection("savedPosts")
-    .limit(CLEANUP.maxDocsPerRun)
-    .get();
-
-  const refs = [];
-  for (const doc of snap.docs) {
-    const roomId = doc.get("roomId");
-    const userId = doc.get("userId");
-
-    if (!roomId || !userId) {
-      refs.push(doc.ref);
-      continue;
-    }
-
-    const [roomDoc, userDoc] = await Promise.all([
-      db.collection("rooms").doc(String(roomId)).get(),
-      db.collection("users").doc(String(userId)).get(),
-    ]);
-
-    if (!roomDoc.exists || !userDoc.exists) {
-      refs.push(doc.ref);
-    }
-  }
-
-  const deleted = await batchDeleteRefs(refs);
-  return { scanned: snap.size, deleted };
-}
-
-async function cleanupOrphanBookedSlots() {
-  const db = admin.firestore();
-  const snap = await db.collection("bookedSlots")
-    .limit(CLEANUP.maxDocsPerRun)
-    .get();
-
-  const refs = [];
-  for (const doc of snap.docs) {
-    // slotId hiện tương ứng appointmentId trong app hiện tại
-    const apptDoc = await db.collection("appointments").doc(doc.id).get();
-    if (!apptDoc.exists) refs.push(doc.ref);
-  }
-
-  const deleted = await batchDeleteRefs(refs);
-  return { scanned: snap.size, deleted };
-}
-
-async function deleteStorageFilesByPredicate(prefix, shouldDeleteFile) {
-  const bucket = admin.storage().bucket();
-  const [files] = await bucket.getFiles({
-    prefix,
-    maxResults: CLEANUP.maxFilesPerPrefixPerRun,
-    autoPaginate: false,
-  });
-
-  let scanned = 0;
-  let deleted = 0;
-
-  for (const file of files) {
-    scanned += 1;
-    try {
-      const canDelete = await shouldDeleteFile(file.name);
-      if (!canDelete) continue;
-      await file.delete({ ignoreNotFound: true });
-      deleted += 1;
-    } catch (e) {
-      console.warn(`[cleanupStorage:${prefix}] skip ${file.name}:`, e.message || e);
-    }
-  }
-
-  return { scanned, deleted };
-}
-
-async function cleanupOrphanRoomImages() {
-  const db = admin.firestore();
-  return deleteStorageFilesByPredicate("rooms/", async (fileName) => {
-    // rooms/{roomId}/{fileName}
-    const parts = String(fileName || "").split("/");
-    if (parts.length < 3) return false;
-    const roomId = parts[1];
-    if (!roomId) return false;
-    const roomDoc = await db.collection("rooms").doc(roomId).get();
-    return !roomDoc.exists;
-  });
-}
-
-async function cleanupOrphanVerificationImages() {
-  const db = admin.firestore();
-  return deleteStorageFilesByPredicate("verifications/", async (fileName) => {
-    // verifications/{uid}/{fileName}
-    const parts = String(fileName || "").split("/");
-    if (parts.length < 3) return false;
-    const uid = parts[1];
-    if (!uid) return false;
-    const verifyDoc = await db.collection("verifications").doc(uid).get();
-    return !verifyDoc.exists;
-  });
-}
-
-async function cleanupOrphanAvatars() {
-  const db = admin.firestore();
-  return deleteStorageFilesByPredicate("avatars/", async (fileName) => {
-    // path có thể là avatars/{uid} hoặc avatars/{uid}/...
-    const path = String(fileName || "").replace(/^avatars\//, "");
-    if (!path) return false;
-    const uid = path.split("/")[0];
-    if (!uid) return false;
-    const userDoc = await db.collection("users").doc(uid).get();
-    return !userDoc.exists;
-  });
-}
-
-async function cleanupOrphanChatImages() {
-  const db = admin.firestore();
-  return deleteStorageFilesByPredicate("chat_images/", async (fileName) => {
-    // chat_images/{chatId}/{fileName}
-    const parts = String(fileName || "").split("/");
-    if (parts.length < 3) return false;
-    const chatId = parts[1];
-    if (!chatId) return false;
-    const chatDoc = await db.collection("chats").doc(chatId).get();
-    return !chatDoc.exists;
-  });
-}
-
-exports.autoReviewVerificationByCloudVision = onDocumentWritten("verifications/{uid}", async (event) => {
-  const beforeSnap = event.data?.before;
-  const afterSnap = event.data?.after;
-  if (!afterSnap || !afterSnap.exists) return null;
-
-  const uid = String(event.params.uid || "");
-  if (!uid) return null;
-
-  const beforeData = beforeSnap && beforeSnap.exists ? (beforeSnap.data() || {}) : null;
-  const data = afterSnap.data() || {};
-  const now = Date.now();
-  const status = String(data.status || "").trim().toLowerCase();
-  if (status !== "pending") return null;
-
-  // Re-run only when entering pending or when user re-submits with changed CCCD/image payload.
-  const beforeStatus = String(beforeData?.status || "").trim().toLowerCase();
-  const enteredPending = !beforeData || beforeStatus !== "pending";
-  const payloadChanged = !beforeData ||
-    String(beforeData.cccdNumber || "") !== String(data.cccdNumber || "") ||
-    String(beforeData.cccdFrontUrl || "") !== String(data.cccdFrontUrl || "") ||
-    String(beforeData.cccdBackUrl || "") !== String(data.cccdBackUrl || "") ||
-    String(beforeData.autoCheckStatus || "") !== String(data.autoCheckStatus || "") ||
-    Boolean(beforeData.escalatedToAdmin) !== Boolean(data.escalatedToAdmin);
-
-  if (!enteredPending && !payloadChanged) return null;
-
-  const db = admin.firestore();
-  const verificationRef = afterSnap.ref;
-  const userRef = db.collection("users").doc(uid);
-  const userDoc = await userRef.get();
-  const currentRole = String(userDoc.data()?.role || "user").toLowerCase();
-  const expectedFullName = String(userDoc.data()?.fullName || "").trim();
-  const isAdmin = currentRole === "admin";
-  const escalatedFromClient = data.escalatedToAdmin === true ||
-    String(data.autoCheckStatus || "").trim().toLowerCase() === "failed_escalated";
-
-  async function moveToAdminReview(reason, failCount = AUTO_FAIL_THRESHOLD + 1) {
-    const batch = db.batch();
-    const notifRef = db.collection("notifications").doc();
-
-    batch.set(verificationRef, {
-      status: "pending_admin_review",
-      updatedAt: now,
-      escalatedToAdmin: true,
-      escalationDeadlineAt: Number(data.escalationDeadlineAt) > 0 ? Number(data.escalationDeadlineAt) : (now + DAY_MS),
-      autoCheckStatus: "failed_escalated",
-      autoCheckReason: reason,
-      autoFailCountToday: failCount,
-      manualApprovalUnlockImmediately: failCount >= AUTO_FAIL_THRESHOLD + 1,
-    }, { merge: true });
-
-    batch.set(userRef, {
-      isVerified: false,
-      role: isAdmin ? "admin" : "user",
-      postingUnlockAt: 0,
-    }, { merge: true });
-
-    batch.set(notifRef, {
-      userId: uid,
-      title: "Hồ sơ đã chuyển admin",
-      message: "Hệ thống đã chuyển hồ sơ sang admin để xử lý thủ công trong 24 giờ.",
-      type: "verification_pending_admin_review",
-      seen: false,
-      isRead: false,
-      createdAt: now,
-    });
-
-    await batch.commit();
-  }
-
-  async function rejectVerification(reason, recognizedCccd = "", failCount = 1) {
-    const batch = db.batch();
-    const rejectNotifRef = db.collection("notifications").doc();
-
-    batch.set(verificationRef, {
-      status: "rejected",
-      reviewedAt: now,
-      reviewedBy: VERIFICATION_REVIEWER_ID,
-      updatedAt: now,
-      rejectReason: reason,
-      autoCheckStatus: "fail_cloud",
-      autoCheckReason: reason,
-      autoCheckRecognizedCccd: recognizedCccd,
-      autoFailCountToday: failCount,
-      escalatedToAdmin: false,
-      escalationDeadlineAt: 0,
-    }, { merge: true });
-
-    batch.set(userRef, {
-      isVerified: false,
-      role: isAdmin ? "admin" : "user",
-      postingUnlockAt: 0,
-    }, { merge: true });
-
-    batch.set(rejectNotifRef, {
-      userId: uid,
-      title: "Xác minh bị từ chối",
-      message: "Hệ thống chưa xác thực được ảnh Căn cước công dân của bạn. Vui lòng chụp lại rõ nét và gửi lại.",
-      type: "verification_rejected",
-      seen: false,
-      isRead: false,
-      createdAt: now,
-    });
-
-    await batch.commit();
-  }
-
-  if (escalatedFromClient) {
-    const failCount = Math.max(Number(data.autoFailCountToday || 0), AUTO_FAIL_THRESHOLD + 1);
-    await moveToAdminReview("Escalated by client after local OCR retries.", failCount);
-    return null;
-  }
-
-  const expectedCccd = normalizeDigits(data.cccdNumber);
-  const frontUrl = String(data.cccdFrontUrl || "").trim();
-  const backUrl = String(data.cccdBackUrl || "").trim();
-
-  if (!expectedCccd || expectedCccd.length !== 12 || !frontUrl || !backUrl) {
-    const failCount = await increaseCloudFailCounter(db, uid);
-    if (failCount > AUTO_FAIL_THRESHOLD) {
-      await moveToAdminReview("Cloud Vision input is invalid. Please recapture both CCCD images.", failCount);
-      return null;
-    }
-    await rejectVerification("Cloud Vision input is invalid. Please recapture both CCCD images.", "", failCount);
-    return null;
-  }
-
-  let cloudResult;
   try {
-    cloudResult = await detectCccdByCloudVision(frontUrl, backUrl, expectedCccd, expectedFullName);
-  } catch (error) {
-    console.error("[autoReviewVerificationByCloudVision] Cloud Vision error:", error);
-    await moveToAdminReview("Cloud Vision is temporarily unavailable. Admin review is required.");
-    return null;
-  }
-
-  if (cloudResult.passed) {
-    const batch = db.batch();
-    const notifRef = db.collection("notifications").doc();
-
-    batch.set(verificationRef, {
-      status: "approved",
-      reviewedAt: now,
-      reviewedBy: VERIFICATION_REVIEWER_ID,
-      updatedAt: now,
-      autoCheckStatus: "pass_cloud",
-      autoCheckReason: cloudResult.reason,
-      autoCheckRecognizedCccd: cloudResult.recognizedCccd || expectedCccd,
-      escalatedToAdmin: false,
-      escalationDeadlineAt: 0,
-    }, { merge: true });
-
-    batch.set(userRef, {
-      isVerified: true,
-      role: isAdmin ? "admin" : "user",
-      postingUnlockAt: 0,
-      verifiedAt: now,
-    }, { merge: true });
-
-    batch.set(notifRef, {
-      userId: uid,
-      title: "Xác minh thành công!",
-      message: "Hệ thống đã tự động duyệt thông tin của bạn thành công. Bạn có thể đăng bài ngay.",
-      type: "verification_approved",
-      seen: false,
-      isRead: false,
-      createdAt: now,
+    await db.collection('stats').doc('dashboard_stats').set({
+      stats: newStats,
+      updatedAt: now
     });
-
-    await batch.commit();
-    await resetCloudFailCounter(db, uid);
-    return null;
+  } catch (e) {
+    console.warn("Lỗi ghi cache stats vào Firestore:", e.message);
   }
 
-  const failCount = await increaseCloudFailCounter(db, uid);
-  if (failCount > AUTO_FAIL_THRESHOLD) {
-    await moveToAdminReview(cloudResult.reason, failCount);
-    return null;
-  }
-
-  await rejectVerification(cloudResult.reason, cloudResult.recognizedCccd || "", failCount);
-  return null;
+  return newStats;
 });
 
 exports.autoUnlockUsers = onSchedule("every 1 mins", async () => {
@@ -684,35 +171,7 @@ exports.autoUnlockUsers = onSchedule("every 1 mins", async () => {
   return null;
 });
 
-exports.dailyDataCleanup = onSchedule(
-  { schedule: "every day 03:20", timeZone: "Asia/Ho_Chi_Minh" },
-  async () => {
-    const now = Date.now();
-    const results = {};
-
-    try {
-      results.notifications = await cleanupOldNotifications(now);
-      results.systemNotifications = await cleanupOldSystemNotifications(now);
-      results.verifications = await cleanupOldVerifications(now);
-      results.savedPosts = await cleanupOrphanSavedPosts();
-      results.bookedSlots = await cleanupOrphanBookedSlots();
-
-      // Storage orphan cleanup
-      results.storageRooms = await cleanupOrphanRoomImages();
-      results.storageVerifications = await cleanupOrphanVerificationImages();
-      results.storageAvatars = await cleanupOrphanAvatars();
-      results.storageChatImages = await cleanupOrphanChatImages();
-
-      console.log("[dailyDataCleanup] done:", results);
-    } catch (error) {
-      console.error("[dailyDataCleanup] failed:", error);
-    }
-
-    return null;
-  }
-);
-
-exports.deleteUserAccount = onRequest(async (req, res) => {
+exports.deleteUserAccount = onRequest({ invoker: "public" }, async (req, res) => {
   return cors(req, res, async () => {
     if (req.method === "OPTIONS") {
       return res.status(204).send("");
@@ -733,535 +192,225 @@ exports.deleteUserAccount = onRequest(async (req, res) => {
       const decodedToken = await admin.auth().verifyIdToken(idToken);
       const callerUid = decodedToken.uid;
 
-      const callerDoc = await admin.firestore().collection("users").doc(callerUid).get();
-      if (!callerDoc.exists || callerDoc.data().role !== "admin") {
-        return res.status(403).send({ error: "Quyền truy cập bị từ chối" });
-      }
-
       const { uid } = req.body || {};
       if (!uid || typeof uid !== "string") {
         return res.status(400).send({ error: "Thiếu UID người dùng hợp lệ" });
       }
 
-      if (uid === callerUid) {
+      const db = admin.firestore();
+      const callerDoc = await db.collection("users").doc(callerUid).get();
+      const isAdmin = callerDoc.exists && callerDoc.data().role === "admin";
+      const isSelfDelete = (callerUid === uid);
+
+      // Cho phép: Admin xóa người khác, hoặc user tự xóa tài khoản của chính mình
+      if (!isAdmin && !isSelfDelete) {
+        return res.status(403).send({ error: "Quyền truy cập bị từ chối." });
+      }
+
+      if (isAdmin && callerUid === uid) {
         return res.status(400).send({ error: "Không thể tự xóa tài khoản admin đang đăng nhập" });
       }
 
+      // M1 Fix: Mask UID to protect PII in system logs
+      console.log(`Bắt đầu quy trình xóa cascade cho user UID: ${uid.slice(0, 8)}...`);
+
+      // 1. Đọc SĐT từ document user
+      let phoneFromUser = "";
+      try {
+        const userDoc = await db.collection("users").doc(uid).get();
+        if (userDoc.exists) {
+          const ud = userDoc.data() || {};
+          phoneFromUser = String(ud.phone || ud.phoneNumber || "").trim();
+        }
+      } catch (err) {
+        console.warn(`Lỗi đọc SĐT của user ${uid.slice(0, 8)}...:`, err.message);
+      }
+
+      // 2. Đọc số CCCD từ document verification
+      let cccdFromVerification = "";
+      try {
+        const verifyDoc = await db.collection("verifications").doc(uid).get();
+        if (verifyDoc.exists) {
+          const vd = verifyDoc.data() || {};
+          cccdFromVerification = String(vd.cccdNumber || "").trim();
+        }
+      } catch (err) {
+        console.warn(`Lỗi đọc số CCCD của user ${uid.slice(0, 8)}...:`, err.message);
+      }
+
+      const refsToDelete = [];
+
+      // A. Gom users/{uid}, verifications/{uid} và verification_counters/{uid}
+      refsToDelete.push(db.collection("users").doc(uid));
+      refsToDelete.push(db.collection("verifications").doc(uid));
+      refsToDelete.push(db.collection("verification_counters").doc(uid));
+
+      // B. Gom rooms owned by user
+      const roomsSnap = await db.collection("rooms").where("userId", "==", uid).get();
+      const roomIds = [];
+      roomsSnap.forEach(doc => {
+        refsToDelete.push(doc.ref);
+        roomIds.push(doc.id);
+      });
+
+      // C. Gom savedPosts
+      const savedPostsSnap = await db.collection("savedPosts").where("userId", "==", uid).get();
+      savedPostsSnap.forEach(doc => refsToDelete.push(doc.ref));
+
+      // D. Gom notifications
+      const notificationsSnap = await db.collection("notifications").where("userId", "==", uid).get();
+      notificationsSnap.forEach(doc => refsToDelete.push(doc.ref));
+
+      // F. Gom appointments (của tenant hoặc landlord)
+      const apptsTenantSnap = await db.collection("appointments").where("tenantId", "==", uid).get();
+      const apptIds = new Set();
+      apptsTenantSnap.forEach(doc => {
+        refsToDelete.push(doc.ref);
+        apptIds.add(doc.id);
+      });
+      const apptsLandlordSnap = await db.collection("appointments").where("landlordId", "==", uid).get();
+      apptsLandlordSnap.forEach(doc => {
+        refsToDelete.push(doc.ref);
+        apptIds.add(doc.id);
+      });
+
+      // G. Gom bookedSlots dựa trên các cuộc hẹn đã tìm thấy
+      // BUG FIX: bookedSlots ID là roomId_date_time chứ không phải apptId
+      for (const doc of apptsTenantSnap.docs) {
+        const d = doc.data();
+        if (d.roomId && d.appointmentDate && d.appointmentTime) {
+            const slotId = `${d.roomId}_${d.appointmentDate}_${d.appointmentTime}`.replace(/\//g, "-").replace(/:/g, "-").replace(/ /g, "_");
+            refsToDelete.push(db.collection("bookedSlots").doc(slotId));
+        }
+      }
+      for (const doc of apptsLandlordSnap.docs) {
+        const d = doc.data();
+        if (d.roomId && d.appointmentDate && d.appointmentTime) {
+            const slotId = `${d.roomId}_${d.appointmentDate}_${d.appointmentTime}`.replace(/\//g, "-").replace(/:/g, "-").replace(/ /g, "_");
+            refsToDelete.push(db.collection("bookedSlots").doc(slotId));
+        }
+      }
+
+      // H. Gom slot_upgrade_requests và featured_upgrade_requests
+      const slotReqSnap = await db.collection("slot_upgrade_requests").where("uid", "==", uid).get();
+      slotReqSnap.forEach(doc => refsToDelete.push(doc.ref));
+
+      const featuredReqSnap = await db.collection("featured_upgrade_requests").where("uid", "==", uid).get();
+      featuredReqSnap.forEach(doc => refsToDelete.push(doc.ref));
+
+      // I. Gom support_tickets
+      const supportSnap = await db.collection("support_tickets").where("userId", "==", uid).get();
+      supportSnap.forEach(doc => refsToDelete.push(doc.ref));
+
+      // J. Gom room_reports (báo cáo do user tạo hoặc liên quan đến phòng của user)
+      const reportsSnap = await db.collection("room_reports").where("reporterId", "==", uid).get();
+      reportsSnap.forEach(doc => refsToDelete.push(doc.ref));
+
+      // K. Gom registry tài khoản (CCCD và SĐT) theo query
+      const phoneRegSnap = await db.collection("phone_registry").where("uid", "==", uid).get();
+      phoneRegSnap.forEach(doc => refsToDelete.push(doc.ref));
+
+      const cccdRegSnap = await db.collection("cccd_registry").where("uid", "==", uid).get();
+      cccdRegSnap.forEach(doc => refsToDelete.push(doc.ref));
+
+      // L. Gom registry theo document ID trực tiếp
+      if (phoneFromUser) {
+        refsToDelete.push(db.collection("phone_registry").doc(phoneFromUser));
+      }
+      if (cccdFromVerification) {
+        refsToDelete.push(db.collection("cccd_registry").doc(cccdFromVerification));
+      }
+
+      // Loại bỏ các document trùng lặp để tối ưu hóa batch delete
+      const uniqueRefs = [];
+      const seenPaths = new Set();
+      refsToDelete.forEach(ref => {
+        const path = ref.path;
+        if (!seenPaths.has(path)) {
+          seenPaths.add(path);
+          uniqueRefs.push(ref);
+        }
+      });
+
+      // Thực hiện xóa tài liệu trong Firestore theo các batch 500 tài liệu
+      console.log(`Đang tiến hành xóa ${uniqueRefs.length} tài liệu Firestore liên quan...`);
+      for (let i = 0; i < uniqueRefs.length; i += 500) {
+        const chunk = uniqueRefs.slice(i, i + 500);
+        const batch = db.batch();
+        chunk.forEach(ref => batch.delete(ref));
+        await batch.commit();
+      }
+
+      // Xóa tệp Cloud Storage tương ứng
+      console.log(`Đang tiến hành dọn dẹp thư mục ảnh trong Cloud Storage...`);
+      const bucket = admin.storage().bucket();
+      const storagePromises = [];
+
+      storagePromises.push(bucket.deleteFiles({ prefix: `avatars/${uid}` }).catch(e => console.warn(`Không thể dọn dẹp avatars/${uid.slice(0, 8)}...:`, e.message)));
+      storagePromises.push(bucket.deleteFiles({ prefix: `verifications/${uid}` }).catch(e => console.warn(`Không thể dọn dẹp verifications/${uid.slice(0, 8)}...:`, e.message)));
+      
+      for (const roomId of roomIds) {
+        storagePromises.push(bucket.deleteFiles({ prefix: `rooms/${roomId}` }).catch(e => console.warn(`Không thể dọn dẹp rooms/${roomId}:`, e.message)));
+      }
+
+      const storageResults = await Promise.allSettled(storagePromises);
+
+      // Cải tiến 1: Phân tích trạng thái dọn dẹp Cloud Storage
+      const storageCleanupLog = storageResults.map((result, idx) => {
+        let prefix = "";
+        if (idx === 0) prefix = `avatars/${uid.slice(0, 8)}...`;
+        else if (idx === 1) prefix = `verifications/${uid.slice(0, 8)}...`;
+        else prefix = `rooms/${roomIds[idx - 2]}`;
+        
+        return {
+          prefix,
+          status: result.status,
+          reason: result.status === "rejected" ? String(result.reason || result.reason?.message || "Unknown error") : null
+        };
+      });
+      console.log(`Kết quả dọn dẹp Cloud Storage cho UID ${uid.slice(0, 8)}...:`, JSON.stringify(storageCleanupLog));
+
+      // Cuối cùng, xóa tài khoản khỏi Firebase Authentication
+      console.log(`Đang tiến hành xóa tài khoản khỏi Firebase Auth...`);
       try {
         await admin.auth().deleteUser(uid);
-        console.log(`Đã xóa thành công tài khoản Auth: ${uid}`);
-        return res.status(200).send({ message: "Đã xóa tài khoản khỏi Authentication thành công" });
+        console.log(`Đã xóa tài khoản Auth thành công cho UID: ${uid.slice(0, 8)}...`);
       } catch (authError) {
         if (authError.code === "auth/user-not-found") {
-          console.warn(`User ${uid} không tồn tại trong Firebase Auth.`);
-          return res.status(200).send({ message: "User không tồn tại trong Authentication, bỏ qua." });
+          console.warn(`User ${uid.slice(0, 8)}... không tồn tại trong Firebase Auth, bỏ qua bước này.`);
+        } else {
+          throw authError;
         }
-        throw authError;
       }
+
+      // Ghi nhật ký kiểm toán (Audit Log) — che PII, chỉ lưu 4 số cuối
+      const maskPii = (val) => val ? `****${String(val).slice(-4)}` : "N/A";
+      try {
+        const adminName = callerDoc.data()?.fullName || callerDoc.data()?.email || "Admin";
+        await db.collection("admin_logs").add({
+          actorId: callerUid,
+          actorName: adminName,
+          action: "DELETE_USER_ACCOUNT",
+          targetId: uid,
+          targetPhone: maskPii(phoneFromUser),
+          targetCccd: maskPii(cccdFromVerification),
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          details: `Xóa tài khoản UID: ${uid.slice(0, 8)}... SĐT: ${maskPii(phoneFromUser)}. CCCD: ${maskPii(cccdFromVerification)}. Đã dọn dẹp ${roomIds.length} phòng. Bộ nhớ: ${JSON.stringify(storageCleanupLog)}`
+        });
+        console.log(`Đã ghi Audit Log thành công cho hành động xóa tài khoản user UID: ${uid.slice(0, 8)}...`);
+      } catch (logErr) {
+        console.error("Lỗi khi ghi Audit Log xóa tài khoản:", logErr);
+      }
+
+      console.log(`Hoàn thành quy trình xóa tài khoản thành công cho user UID: ${uid.slice(0, 8)}...`);
+      return res.status(200).send({ message: "Đã xóa tài khoản và toàn bộ dữ liệu liên quan thành công" });
+
     } catch (error) {
-      console.error("Lỗi khi xóa tài khoản:", error);
-      return res.status(500).send({ error: error.message });
+      console.error("Lỗi nghiêm trọng trong quy trình xóa tài khoản:", error);
+      return res.status(500).send({ error: "Lỗi hệ thống, vui lòng thử lại sau." });
     }
   });
 });
-
-exports.sendPushNotification = onDocumentCreated("notifications/{notifId}", async (event) => {
-  const data = event.data?.data();
-  if (!data) return;
-
-  const userId = data.userId;
-  const title = data.title || "Thông báo mới";
-  const body = data.message || "";
-
-  if (!userId) {
-    console.log("Không có userId trong notification, bỏ qua.");
-    return;
-  }
-
-  try {
-    const userDoc = await admin.firestore().collection("users").doc(userId).get();
-    if (!userDoc.exists) {
-      console.log(`Không tìm thấy user: ${userId}`);
-      return;
-    }
-
-    const fcmToken = userDoc.data()?.fcmToken;
-    if (!fcmToken) {
-      console.log(`User ${userId} chưa có FCM Token, bỏ qua.`);
-      return;
-    }
-
-    const message = {
-      token: fcmToken,
-      notification: {
-        title,
-        body,
-      },
-      android: {
-        priority: "high",
-        notification: {
-          sound: "default",
-          channelId: "fcm_notification_channel",
-        },
-      },
-      data: {
-        type: data.type || "general",
-        userId,
-        chatId: data.chatId || "",
-        senderId: data.senderId || "",
-      },
-    };
-
-    const response = await admin.messaging().send(message);
-    console.log(`Gửi thông báo thành công tới ${userId}: ${response}`);
-  } catch (error) {
-    console.error(`Lỗi gửi thông báo tới ${userId}:`, error);
-  }
-});
-
-// Slot upgrade payment automation via SePay
-const { defineSecret } = require("firebase-functions/params");
-const sepayApiToken = defineSecret("SEPAY_API_TOKEN");
-const SEPAY_TRANSACTIONS_API = "https://my.sepay.vn/userapi/transactions/list";
-const SLOT_UPGRADE_EXPIRE_MS = 30 * 60 * 1000;
-const SLOT_UPGRADE_SCAN_LIMIT = 200;
-
-function normalizeSePayContent(raw) {
-  // Normalize for loose matching: remove spaces + punctuation differences
-  // (bank/sepay có thể bỏ "_" hoặc thêm ký tự phân tách).
-  return String(raw || "")
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[^a-z0-9]/g, "");
-}
-
-function extractRequestCode(raw) {
-  // Match REQ_ABCDEFGH, REQ-ABCDEFGH, REQ ABCDEFGH, REQABCDEFGH
-  const text = String(raw || "").toUpperCase();
-  const m = text.match(/REQ[_\-\s]*([A-Z0-9]{8})/);
-  return m ? m[1] : "";
-}
-
-function parseSePayAmount(raw) {
-  if (typeof raw === "number") return Number.isFinite(raw) ? Math.round(raw) : 0;
-  const text = String(raw || "").trim();
-  if (!text) return 0;
-
-  // Xóa phần thập phân .00 nếu có ở cuối chuỗi để tránh bị parse thành hàng triệu
-  let cleaned = text.replace(/\.00$/, "");
-
-  // Sau đó ưu tiên lấy chuỗi số thuần để tránh lỗi locale 10.000 / 10,000 / 10 000 đ
-  const digits = cleaned.replace(/[^\d]/g, "");
-  if (digits) {
-    const parsedInt = Number.parseInt(digits, 10);
-    return Number.isFinite(parsedInt) ? parsedInt : 0;
-  }
-  return 0;
-}
-
-function extractSePayTxId(tx) {
-  return String(
-    tx?.id ||
-    tx?.transaction_id ||
-    tx?.reference_id ||
-    tx?.transaction_reference ||
-    tx?.reference ||
-    tx?.code ||
-    ""
-  ).trim();
-}
-
-function pickSePayContent(tx) {
-  return String(
-    tx?.transaction_content ||
-    tx?.content ||
-    tx?.description ||
-    tx?.transferContent ||
-    tx?.remark ||
-    tx?.memo ||
-    ""
-  );
-}
-
-async function fetchSePayTransactions(token) {
-  // limit=100 để lấy đủ giao dịch gần nhất, tránh bỏ sót khi có nhiều giao dịch.
-  const url = `${SEPAY_TRANSACTIONS_API}?limit=100`;
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-  });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`SePay API failed (${res.status}): ${body}`);
-  }
-
-  const payload = await res.json();
-  const list = Array.isArray(payload?.transactions)
-    ? payload.transactions
-    : Array.isArray(payload?.data?.transactions)
-      ? payload.data.transactions
-      : Array.isArray(payload?.data)
-        ? payload.data
-        : [];
-  return list.map((tx) => ({
-    txId: extractSePayTxId(tx),
-    amountIn: parseSePayAmount(
-      tx?.amount_in ??
-      tx?.amountIn ??
-      tx?.amount_in_value ??
-      tx?.amountValue ??
-      tx?.in_amount ??
-      tx?.credit ??
-      tx?.amount ??
-      tx?.amount_in_text
-    ),
-    content: normalizeSePayContent(pickSePayContent(tx)),
-    rawContent: pickSePayContent(tx),
-  }));
-}
-
-
-exports.processPendingSlotUpgradePayments = onSchedule(
-  { schedule: "every 1 minutes", timeZone: "Asia/Ho_Chi_Minh", secrets: [sepayApiToken] },
-  async () => {
-    const token = String(sepayApiToken.value() || "").trim();
-    if (!token) {
-      console.error("[processPendingSlotUpgradePayments] Missing SEPAY_API_TOKEN secret.");
-      return null;
-    }
-
-    const db = admin.firestore();
-    const now = Date.now();
-
-    const waitingSnap = await db.collection("slot_upgrade_requests")
-      .where("status", "==", "waiting_for_payment")
-      .limit(SLOT_UPGRADE_SCAN_LIMIT)
-      .get();
-
-    if (waitingSnap.empty) return null;
-
-    let transactions = [];
-    try {
-      transactions = await fetchSePayTransactions(token);
-    } catch (error) {
-      console.error("[processPendingSlotUpgradePayments] Cannot fetch SePay transactions:", error);
-      return null;
-    }
-
-    for (const doc of waitingSnap.docs) {
-      const data = doc.data() || {};
-      const createdAt = Number(data.createdAt || 0);
-      const expiresAt = Number(data.expiresAt || (createdAt > 0 ? createdAt + SLOT_UPGRADE_EXPIRE_MS : 0));
-      const expectedAmount = Number(data.amount || 0);
-      const expectedNote = normalizeSePayContent(data.transferNote);
-      const expectedRequestCode = extractRequestCode(data.transferNote);
-
-      if (!expectedNote || expectedAmount <= 0) {
-        continue;
-      }
-
-      if (expiresAt > 0 && now > expiresAt) {
-        await doc.ref.set({
-          status: "expired",
-          expiredAt: now,
-          updatedAt: now,
-        }, { merge: true });
-        continue;
-      }
-
-      const matchedTx = transactions.find((tx) => {
-        const txRequestCode = extractRequestCode(tx.rawContent || "");
-
-        // Ưu tiên match theo REQ code (độc nhất cho từng request).
-        if (expectedRequestCode && txRequestCode) {
-          return txRequestCode === expectedRequestCode;
-        }
-
-        // Fallback 1: vẫn có thể match bằng request code nằm trong chuỗi đã normalize.
-        if (expectedRequestCode && tx.content.includes(`req${expectedRequestCode.toLowerCase()}`)) {
-          return true;
-        }
-
-        // Fallback legacy: amount + note
-        if (tx.amountIn !== expectedAmount) return false;
-        return tx.content.includes(expectedNote);
-      });
-
-      if (!matchedTx) {
-        console.log("[processPendingSlotUpgradePayments] no match", {
-          requestId: doc.id,
-          expectedAmount,
-          expectedRequestCode,
-          expectedNote,
-          txSample: transactions.slice(0, 5).map((t) => ({
-            txId: t.txId,
-            amountIn: t.amountIn,
-            requestCode: extractRequestCode(t.rawContent || ""),
-            rawContent: t.rawContent,
-          })),
-        });
-      }
-      if (!matchedTx) continue;
-
-      const uid = String(data.uid || "").trim();
-      const slots = Number(data.slots || 0);
-      if (!uid || slots <= 0) {
-        await doc.ref.set({
-          status: "failed",
-          failReason: "invalid_request_payload",
-          updatedAt: now,
-        }, { merge: true });
-        continue;
-      }
-
-      const userRef = db.collection("users").doc(uid);
-      const notifRef = db.collection("notifications").doc();
-
-      await db.runTransaction(async (tx) => {
-        const freshReqSnap = await tx.get(doc.ref);
-        if (!freshReqSnap.exists) return;
-
-        const freshReq = freshReqSnap.data() || {};
-        if (String(freshReq.status || "") !== "waiting_for_payment") {
-          return;
-        }
-
-        const freshCreatedAt = Number(freshReq.createdAt || 0);
-        const freshExpiresAt = Number(freshReq.expiresAt || (freshCreatedAt > 0 ? freshCreatedAt + SLOT_UPGRADE_EXPIRE_MS : 0));
-        if (freshExpiresAt > 0 && now > freshExpiresAt) {
-          tx.set(doc.ref, {
-            status: "expired",
-            expiredAt: now,
-            updatedAt: now,
-          }, { merge: true });
-          return;
-        }
-
-        const userSnap = await tx.get(userRef);
-        const currentSlots = Number(userSnap.data()?.purchasedSlots || 0);
-        const expectedFreshAmount = Math.round(Number(freshReq.amount || 0));
-        const receivedAmount = Math.round(Number(matchedTx.amountIn || 0));
-        if (expectedFreshAmount <= 0 || receivedAmount !== expectedFreshAmount) {
-          // Số tiền không khớp: bỏ qua để lần poll tiếp theo thử lại (không đặt 'failed' vĩnh viễn).
-          console.warn("[processPendingSlotUpgradePayments] amount_mismatch, skipping:", {
-            requestId: doc.id, expected: expectedFreshAmount, received: receivedAmount,
-          });
-          return;
-        }
-
-        tx.set(doc.ref, {
-          status: "paid",
-          paidAt: now,
-          updatedAt: now,
-          paymentProvider: "sepay",
-          providerTxId: matchedTx.txId,
-          paidAmount: matchedTx.amountIn,
-          paidContent: matchedTx.rawContent,
-        }, { merge: true });
-
-        tx.set(userRef, {
-          purchasedSlots: currentSlots + slots,
-        }, { merge: true });
-
-        tx.set(notifRef, {
-          userId: uid,
-          title: "Nạp lượt thành công",
-          message: `Bạn đã được cộng thêm ${slots} lượt đăng bài.`,
-          type: "slot_upgrade_paid",
-          seen: false,
-          isRead: false,
-          createdAt: now,
-        });
-      });
-    }
-
-    return null;
-  }
-);
-
-exports.processPendingFeaturedUpgradePayments = onSchedule(
-  { schedule: "every 1 minutes", timeZone: "Asia/Ho_Chi_Minh", secrets: [sepayApiToken] },
-  async () => {
-    const token = String(sepayApiToken.value() || "").trim();
-    if (!token) {
-      console.error("[processPendingFeaturedUpgradePayments] Missing SEPAY_API_TOKEN secret.");
-      return null;
-    }
-
-    const db = admin.firestore();
-    const now = Date.now();
-
-    // Reset các document bị kẹt ở "failed" do amount_mismatch cũ (lỗi logic cũ) về lại waiting_for_payment
-    // để chúng được xử lý lại trong lần poll này.
-    const failedSnap = await db.collection("featured_upgrade_requests")
-      .where("status", "==", "failed")
-      .where("failReason", "==", "amount_mismatch")
-      .limit(50)
-      .get();
-    if (!failedSnap.empty) {
-      const resetBatch = db.batch();
-      failedSnap.docs.forEach((d) => {
-        // Reset về waiting_for_payment bất kể hết hạn hay chưa,
-        // vì người dùng đã chuyển tiền thành công. Hết hạn sẽ kiểm tra lại ở vòng poll chính.
-        // Đồng thời gia hạn expiresAt thêm 30 phút để kịp match giao dịch.
-        resetBatch.update(d.ref, {
-          status: "waiting_for_payment",
-          expiresAt: now + SLOT_UPGRADE_EXPIRE_MS,
-          updatedAt: now,
-        });
-      });
-      await resetBatch.commit();
-      console.log(`[processPendingFeaturedUpgradePayments] Reset ${failedSnap.size} amount_mismatch docs back to waiting_for_payment.`);
-    }
-
-    const waitingSnap = await db.collection("featured_upgrade_requests")
-      .where("status", "==", "waiting_for_payment")
-      .limit(SLOT_UPGRADE_SCAN_LIMIT)
-      .get();
-
-    if (waitingSnap.empty) return null;
-
-    let transactions = [];
-    try {
-      transactions = await fetchSePayTransactions(token);
-    } catch (error) {
-      console.error("[processPendingFeaturedUpgradePayments] Cannot fetch SePay transactions:", error);
-      return null;
-    }
-
-    for (const doc of waitingSnap.docs) {
-      const data = doc.data() || {};
-      const createdAt = Number(data.createdAt || 0);
-      const expiresAt = Number(data.expiresAt || (createdAt > 0 ? createdAt + SLOT_UPGRADE_EXPIRE_MS : 0));
-      const expectedAmount = Number(data.amount || 0);
-      const expectedNote = normalizeSePayContent(data.transferNote);
-      const expectedRequestCode = extractRequestCode(data.transferNote);
-
-      if (!expectedNote || expectedAmount <= 0) continue;
-
-      if (expiresAt > 0 && now > expiresAt) {
-        await doc.ref.set({
-          status: "expired",
-          approvalStatus: "expired",
-          expiredAt: now,
-          updatedAt: now,
-        }, { merge: true });
-        continue;
-      }
-
-      const matchedTx = transactions.find((tx) => {
-        const txRequestCode = extractRequestCode(tx.rawContent || "");
-        if (expectedRequestCode && txRequestCode) return txRequestCode === expectedRequestCode;
-        if (expectedRequestCode && tx.content.includes(`req${expectedRequestCode.toLowerCase()}`)) return true;
-        if (tx.amountIn !== expectedAmount) return false;
-        return tx.content.includes(expectedNote);
-      });
-      if (!matchedTx) continue;
-
-      const uid = String(data.uid || "").trim();
-      const roomId = String(data.roomId || "").trim();
-      const days = Number(data.days || 0);
-      if (!uid || !roomId || days <= 0) {
-        await doc.ref.set({
-          status: "failed",
-          failReason: "invalid_request_payload",
-          updatedAt: now,
-        }, { merge: true });
-        continue;
-      }
-
-      const roomRef = db.collection("rooms").doc(roomId);
-      const notifRef = db.collection("notifications").doc();
-
-      await db.runTransaction(async (tx) => {
-        const freshReqSnap = await tx.get(doc.ref);
-        if (!freshReqSnap.exists) return;
-        const freshReq = freshReqSnap.data() || {};
-        if (String(freshReq.status || "") !== "waiting_for_payment") return;
-
-        const freshCreatedAt = Number(freshReq.createdAt || 0);
-        const freshExpiresAt = Number(freshReq.expiresAt || (freshCreatedAt > 0 ? freshCreatedAt + SLOT_UPGRADE_EXPIRE_MS : 0));
-        if (freshExpiresAt > 0 && now > freshExpiresAt) {
-          tx.set(doc.ref, {
-            status: "expired",
-            approvalStatus: "expired",
-            expiredAt: now,
-            updatedAt: now,
-          }, { merge: true });
-          return;
-        }
-
-        const expectedFreshAmount = Math.round(Number(freshReq.amount || 0));
-        const receivedAmount = Math.round(Number(matchedTx.amountIn || 0));
-        if (expectedFreshAmount <= 0 || receivedAmount !== expectedFreshAmount) {
-          // Số tiền không khớp: bỏ qua để lần poll tiếp theo thử lại (không đặt 'failed' vĩnh viễn).
-          console.warn("[processPendingFeaturedUpgradePayments] amount_mismatch, skipping:", {
-            requestId: doc.id, expected: expectedFreshAmount, received: receivedAmount,
-          });
-          return;
-        }
-
-        tx.set(doc.ref, {
-          status: "paid_waiting_admin",
-          approvalStatus: "pending_admin",
-          paidAt: now,
-          updatedAt: now,
-          paymentProvider: "sepay",
-          providerTxId: matchedTx.txId,
-          paidAmount: matchedTx.amountIn,
-          paidContent: matchedTx.rawContent,
-        }, { merge: true });
-
-        tx.set(roomRef, {
-          featuredRequestId: doc.id,
-          featuredRequestStatus: "paid_waiting_admin",
-        }, { merge: true });
-
-        tx.set(notifRef, {
-          userId: uid,
-          title: "Đã thanh toán gói nổi bật",
-          message: "Yêu cầu đẩy bài nổi bật đã được ghi nhận và đang chờ admin duyệt.",
-          type: "featured_upgrade_paid",
-          seen: false,
-          isRead: false,
-          createdAt: now,
-        });
-      });
-    }
-
-    return null;
-  }
-);
-
-exports.autoDisableExpiredFeaturedRooms = onSchedule(
-  { schedule: "every 30 minutes", timeZone: "Asia/Ho_Chi_Minh" },
-  async () => {
-    const db = admin.firestore();
-    const now = Date.now();
-    const snap = await db.collection("rooms")
-      .where("isFeatured", "==", true)
-      .where("featuredUntil", "<=", now)
-      .limit(200)
-      .get();
-
-    if (snap.empty) return null;
-
-    const batch = db.batch();
-    snap.docs.forEach((doc) => {
-      batch.set(doc.ref, {
-        isFeatured: false,
-        featuredRequestStatus: "expired",
-        featuredExpiredAt: now,
-      }, { merge: true });
-    });
-    await batch.commit();
-    return null;
-  }
-);
 
 exports.updatePopularAreasStats = onDocumentWritten("rooms/{roomId}", async (event) => {
   const beforeData = event.data?.before?.exists ? event.data.before.data() : null;
@@ -1273,15 +422,10 @@ exports.updatePopularAreasStats = onDocumentWritten("rooms/{roomId}", async (eve
   const beforeDistrict = beforeData ? (beforeData.district || "").trim() : "";
   const afterDistrict = afterData ? (afterData.district || "").trim() : "";
 
-  // Nếu không có thay đổi liên quan đến status = 'approved' hoặc district, bỏ qua
   if (beforeStatus !== 'approved' && afterStatus !== 'approved') return null;
   if (beforeStatus === 'approved' && afterStatus === 'approved' && beforeDistrict === afterDistrict) return null;
 
   const db = admin.firestore();
-  
-  // Do không muốn dùng transaction đếm (+1 / -1) thủ công phức tạp (dễ sai lệch nếu sửa tay data),
-  // và trigger chỉ chạy khi có thay đổi status/district, ta có thể dùng hàm aggregation .count() 
-  // kết hợp query nhanh để xây dựng lại danh sách popular areas (Cloud Function chạy ẩn không tốn data transfer về client).
   
   const allApprovedSnap = await db.collection("rooms").where("status", "==", "approved").get();
   
@@ -1305,3 +449,770 @@ exports.updatePopularAreasStats = onDocumentWritten("rooms/{roomId}", async (eve
   await db.collection("stats").doc("popular_areas").set({ areas: popularAreas, updatedAt: Date.now() });
   return null;
 });
+
+// ?? Sub-module exports ?????????????????????????????????????????????????
+const verification = require('./functions/verification');
+exports.autoReviewVerificationByCloudVision = verification.autoReviewVerificationByCloudVision;
+
+
+// Dọn dẹp dữ liệu khi user bị xóa khỏi Firebase Auth
+exports.onUserDeleted = functionsV1.auth.user().onDelete(async (user) => {
+  const db = admin.firestore();
+  const uid = user.uid;
+  try {
+    await db.collection('users').doc(uid).delete();
+
+    const [notifSnap, apptSnap, savedSnap] = await Promise.all([
+      db.collection('notifications').where('userId', '==', uid).get(),
+      db.collection('appointments').where('tenantId', '==', uid).where('status', '==', 'pending').get(),
+      db.collection('savedPosts').where('userId', '==', uid).get(),
+    ]);
+
+    const chunks = (docs) => {
+      const result = [];
+      for (let i = 0; i < docs.length; i += 450) result.push(docs.slice(i, i + 450));
+      return result;
+    };
+
+    const commitBatch = async (docs, fn) => {
+      for (const chunk of chunks(docs)) {
+        const b = db.batch();
+        chunk.forEach(d => fn(b, d));
+        await b.commit();
+      }
+    };
+
+    await Promise.all([
+      commitBatch(notifSnap.docs, (b, d) => b.delete(d.ref)),
+      commitBatch(apptSnap.docs, (b, d) => b.update(d.ref, { status: 'cancelled_by_system' })),
+      commitBatch(savedSnap.docs, (b, d) => b.delete(d.ref)),
+    ]);
+
+    console.log(`[onUserDeleted] cleaned up data for uid=${uid}`);
+  } catch (e) {
+    console.error(`[onUserDeleted] error for uid=${uid}:`, e);
+  }
+});
+
+// Dọn dẹp dữ liệu liên quan khi phòng bị xóa (an toàn lưới cho trường hợp Android cleanup bị gián đoạn)
+exports.onRoomDeleted = onDocumentDeleted('rooms/{roomId}', async (event) => {
+  const roomId = event.params.roomId;
+  const roomData = event.data ? event.data.data() : {};
+  const roomTitle = roomData.title || 'Phòng trọ';
+  const db = admin.firestore();
+
+  const chunks = (docs) => {
+    const result = [];
+    for (let i = 0; i < docs.length; i += 450) result.push(docs.slice(i, i + 450));
+    return result;
+  };
+  const commitBatch = async (docs, fn) => {
+    for (const chunk of chunks(docs)) {
+      const b = db.batch();
+      chunk.forEach(d => fn(b, d));
+      await b.commit();
+    }
+  };
+
+  try {
+    const [apptSnap, savedSnap, featSnap, slotSnap] = await Promise.all([
+      db.collection('appointments').where('roomId', '==', roomId).get(),
+      db.collection('savedPosts').where('roomId', '==', roomId).get(),
+      db.collection('featured_upgrade_requests').where('roomId', '==', roomId).get(),
+      db.collection('bookedSlots').where('roomId', '==', roomId).get(),
+    ]);
+
+    const activeStatuses = new Set(['pending', 'confirmed', 'tenant_confirmed']);
+    const notifPromises = [];
+    const apptDocsToCancel = apptSnap.docs.filter(d => activeStatuses.has(d.data().status));
+
+    for (const d of apptDocsToCancel) {
+      const tenantId = d.data().tenantId;
+      if (tenantId) {
+        notifPromises.push(db.collection('notifications').add({
+          userId: tenantId,
+          title: 'Bài đăng đã bị xóa',
+          message: `Phòng "${roomTitle}" bạn đã đặt lịch hẹn đã bị xóa. Lịch hẹn của bạn đã bị hủy.`,
+          type: 'room_deleted',
+          seen: false,
+          isRead: false,
+          createdAt: Date.now(),
+        }));
+      }
+    }
+
+    const cancelStatuses = new Set(['waiting_for_payment', 'paid_waiting_admin']);
+
+    await Promise.all([
+      commitBatch(apptDocsToCancel, (b, d) => b.update(d.ref, { status: 'cancelled_by_system', hasUnreadUpdate: true })),
+      commitBatch(savedSnap.docs, (b, d) => b.delete(d.ref)),
+      commitBatch(featSnap.docs.filter(d => cancelStatuses.has(d.data().status)), (b, d) =>
+        b.update(d.ref, { status: 'cancelled', approvalStatus: 'cancelled', updatedAt: Date.now() })),
+      commitBatch(slotSnap.docs, (b, d) => b.delete(d.ref)),
+      ...notifPromises,
+    ]);
+
+    console.log(`[onRoomDeleted] cleaned up roomId=${roomId}, appointments=${apptDocsToCancel.length}, saved=${savedSnap.size}, slots=${slotSnap.size}`);
+  } catch (e) {
+    console.error(`[onRoomDeleted] error for roomId=${roomId}:`, e);
+  }
+});
+
+exports.serverReservePostSlot = onCall({ cors: true }, async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) throw new HttpsError('unauthenticated', 'Bạn chưa đăng nhập.');
+
+  const FREE_POSTS_PER_DAY = 3;
+  const now = Date.now();
+
+  // Build server-time GMT+7 date string ("YYYY-MM-DD")
+  const gmt7Date = new Date(now + 7 * 60 * 60 * 1000);
+  const yyyy = gmt7Date.getUTCFullYear();
+  const mm = String(gmt7Date.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(gmt7Date.getUTCDate()).padStart(2, '0');
+  const todayGmt7 = `${yyyy}-${mm}-${dd}`;
+
+  const db = admin.firestore();
+  const userRef = db.collection('users').doc(uid);
+
+  try {
+    return await db.runTransaction(async (tx) => {
+      const userSnap = await tx.get(userRef);
+      if (!userSnap.exists) throw new HttpsError('not-found', 'Không tìm thấy tài khoản người dùng.');
+
+      const storedDate = userSnap.get('dailyPostCountDate') || '';
+      const storedCount = storedDate === todayGmt7 ? (userSnap.get('dailyPostCount') || 0) : 0;
+      const purchased = userSnap.get('purchasedSlots') || 0;
+
+      // Priority 1: free daily slots
+      if (storedCount < FREE_POSTS_PER_DAY) {
+        tx.update(userRef, { dailyPostCountDate: todayGmt7, dailyPostCount: storedCount + 1 });
+        return { allowed: true, usePurchasedSlot: false };
+      }
+
+      // Priority 2: purchased extra slots
+      if (purchased > 0) {
+        tx.update(userRef, { purchasedSlots: purchased - 1, lastSlotConsumedAt: now });
+        return { allowed: true, usePurchasedSlot: true };
+      }
+
+      // Blocked — compute unlock time at midnight GMT+7 tomorrow
+      const tomorrowGmt7 = new Date(gmt7Date);
+      tomorrowGmt7.setUTCDate(tomorrowGmt7.getUTCDate() + 1);
+      tomorrowGmt7.setUTCHours(0, 0, 0, 0);
+      const unlockAt = tomorrowGmt7.getTime() - 7 * 60 * 60 * 1000;
+      return { allowed: false, unlockAt };
+    });
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    throw new HttpsError('internal', e.message || 'Lỗi kiểm tra quota đăng bài.');
+  }
+});
+
+// ─── Helper shared by booking CFs ───────────────────────────────────────────
+function buildSlotId(roomId, date, time) {
+  return `${roomId}_${date}_${time}`
+    .replace(/\//g, '-').replace(/:/g, '-').replace(/ /g, '_');
+}
+
+// ─── serverSubmitBooking: enforce max-2-active appointments server-side ──────
+exports.serverSubmitBooking = onCall({ cors: true }, async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) throw new HttpsError('unauthenticated', 'Bạn chưa đăng nhập.');
+
+  const { roomId, appointmentDate, appointmentTime } = request.data || {};
+  if (!roomId || !appointmentDate || !appointmentTime) {
+    throw new HttpsError('invalid-argument', 'Thiếu thông tin lịch hẹn (roomId, date, time).');
+  }
+
+  const db = admin.firestore();
+
+  // Check 1a (server-side): Giới hạn slot đã lock (confirmed/tenant_confirmed, max 2)
+  const confirmedSnap = await db.collection('appointments')
+    .where('tenantId', '==', uid)
+    .where('status', 'in', ['confirmed', 'tenant_confirmed'])
+    .get();
+  if (confirmedSnap.size >= 2) {
+    throw new HttpsError('resource-exhausted',
+      `Bạn đang có ${confirmedSnap.size} lịch hẹn đã xác nhận. Vui lòng hoàn tất các lịch hẹn trước khi đặt thêm.`);
+  }
+
+  // Check 1b (server-side): Giới hạn lịch hẹn pending (chưa lock slot, max 3)
+  const pendingCheckSnap = await db.collection('appointments')
+    .where('tenantId', '==', uid)
+    .where('status', '==', 'pending')
+    .get();
+  if (pendingCheckSnap.size >= 3) {
+    throw new HttpsError('resource-exhausted',
+      `Bạn đang có ${pendingCheckSnap.size} lịch hẹn chờ xác nhận. Vui lòng chờ phản hồi hoặc hủy bớt trước khi đặt thêm.`);
+  }
+
+  // Check 2 (server-side): maxDailyAppointments của phòng
+  const roomDoc = await db.collection('rooms').doc(roomId).get();
+  if (!roomDoc.exists) throw new HttpsError('not-found', 'Không tìm thấy phòng.');
+  const maxDaily = (roomDoc.data().maxDailyAppointments) || 10;
+
+  const daySlotSnap = await db.collection('bookedSlots')
+    .where('roomId', '==', roomId)
+    .where('date', '==', appointmentDate)
+    .get();
+
+  if (daySlotSnap.size >= maxDaily) {
+    throw new HttpsError('resource-exhausted',
+      `Ngày ${appointmentDate} đã đạt giới hạn tối đa ${maxDaily} lịch hẹn. Vui lòng chọn ngày khác.`);
+  }
+
+  // Check 3 + Tạo appointment trong transaction (tránh race condition đặt trùng slot)
+  const slotId = buildSlotId(roomId, appointmentDate, appointmentTime);
+  const slotRef = db.collection('bookedSlots').doc(slotId);
+  const apptRef = db.collection('appointments').doc();
+  const now = Date.now();
+
+  const appointmentData = {
+    ...request.data,
+    id: apptRef.id,
+    tenantId: uid,           // server override: không cho client giả mạo
+    status: 'pending',
+    createdAt: now,
+    updatedAt: now,
+    landlordConfirmDeadline: now + 48 * 60 * 60 * 1000,
+    tenantConfirmDeadline: 0,  // Sẽ được set khi chủ trọ xác nhận
+    statusHistory: [],
+    editCount: 0,
+    landlordRemind12hSent: false, landlordRemind36hSent: false, landlordRemind47hSent: false,
+    reminder24hSent: false, reminder2hSent: false, reminder30mSent: false, reminder0hSent: false,
+    landlordReminder24hSent: false, landlordReminder2hSent: false,
+    landlordReminder30mSent: false, landlordReminder0hSent: false,
+    resultAskedSent: false, autoNoShowSent: false,
+    hasUnreadUpdate: false, lastNotifiedAt: 0
+  };
+
+  try {
+    await db.runTransaction(async (tx) => {
+      const slotSnap = await tx.get(slotRef);
+      if (slotSnap.exists) {
+        throw new HttpsError('already-exists',
+          `Khung giờ ${appointmentTime} ngày ${appointmentDate} đã có người đặt. Vui lòng chọn giờ khác.`);
+      }
+      tx.set(apptRef, appointmentData);
+    });
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    throw new HttpsError('internal', e.message || 'Lỗi đặt lịch.');
+  }
+
+  return { appointmentId: apptRef.id };
+});
+
+const expiry = require('./functions/expiry');
+exports.notifyExpiringRooms = expiry.notifyExpiringRooms;
+exports.deleteExpiredRooms = expiry.deleteExpiredRooms;
+
+const notifications = require('./functions/notifications');
+exports.sendPushNotification = notifications.sendPushNotification;
+exports.sendBroadcastNotification = notifications.sendBroadcastNotification;
+exports.notifyAdminOnNewSupportTicket = notifications.notifyAdminOnNewSupportTicket;
+exports.notifyAdminOnSupportMessage = notifications.notifyAdminOnSupportMessage;
+
+const payments = require('./functions/payments');
+exports.processPendingSlotUpgradePayments = payments.processPendingSlotUpgradePayments;
+exports.processPendingFeaturedUpgradePayments = payments.processPendingFeaturedUpgradePayments;
+exports.sepayWebhook = payments.sepayWebhook;
+exports.autoDisableExpiredFeaturedRooms = payments.autoDisableExpiredFeaturedRooms;
+
+// ─── Appointment Scheduling Functions ────────────────────────────────────────
+
+const db = admin.firestore();
+
+async function sendAppNotification(userId, title, message, type) {
+  if (!userId) return;
+  await db.collection('notifications').add({
+    userId, title, message, type,
+    seen: false, isRead: false, createdAt: Date.now(),
+  });
+}
+
+/**
+ * Tự động hủy lịch pending sau 48h chủ trọ không xác nhận.
+ * Chạy mỗi 1 giờ.
+ */
+exports.autoRejectExpiredPending = onSchedule(
+  { schedule: 'every 1 hours', timeZone: 'Asia/Ho_Chi_Minh' },
+  async () => {
+    const now = Date.now();
+    const snap = await db.collection('appointments')
+      .where('status', '==', 'pending')
+      .where('landlordConfirmDeadline', '<', now)
+      .get();
+
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const fresh = await t.get(doc.ref);
+        if (!fresh.exists || fresh.data().status !== 'pending') return;
+        t.update(doc.ref, {
+          status: 'expired_pending',
+          updatedAt: now,
+          hasUnreadUpdate: true,
+          statusHistory: admin.firestore.FieldValue.arrayUnion({
+            fromStatus: 'pending', toStatus: 'expired_pending',
+            changedBy: 'system', changedById: 'system',
+            reason: 'Chủ trọ không xác nhận trong 48h', timestamp: now,
+          }),
+        });
+        updated = true;
+      });
+      if (!updated) continue;
+      await sendAppNotification(data.tenantId, 'Lịch hẹn hết hạn',
+        `Chủ trọ không xác nhận trong 48h. Lịch hẹn ngày ${data.appointmentDate} đã tự động hủy. Bạn có thể đặt lại hoặc tìm phòng khác.`,
+        'appointment_expired');
+      await sendAppNotification(data.landlordId, 'Lịch hẹn đã tự hủy',
+        `Lịch hẹn với ${data.tenantName} ngày ${data.appointmentDate} đã tự hủy vì bạn không xác nhận trong 48h. Hãy phản hồi nhanh hơn để không bỏ lỡ khách.`,
+        'appointment_expired_landlord');
+    }
+    console.log(`[autoRejectExpiredPending] Đã xử lý ${snap.size} lịch hết hạn.`);
+  }
+);
+
+/**
+ * Tự động hủy lịch confirmed nếu tenant không xác nhận sẽ đến trước deadline.
+ * Chạy mỗi 30 phút.
+ */
+exports.autoExpireTenantUnconfirmed = onSchedule(
+  { schedule: 'every 30 minutes', timeZone: 'Asia/Ho_Chi_Minh' },
+  async () => {
+    const now = Date.now();
+    const snap = await db.collection('appointments')
+      .where('status', '==', 'confirmed')
+      .where('tenantConfirmDeadline', '>', 0)
+      .where('tenantConfirmDeadline', '<', now)
+      .get();
+
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const fresh = await t.get(doc.ref);
+        if (!fresh.exists || fresh.data().status !== 'confirmed') return;
+        t.update(doc.ref, {
+          status: 'cancelled_by_system',
+          updatedAt: now,
+          hasUnreadUpdate: true,
+          statusHistory: admin.firestore.FieldValue.arrayUnion({
+            fromStatus: 'confirmed', toStatus: 'cancelled_by_system',
+            changedBy: 'system', changedById: 'system',
+            reason: 'Người thuê không xác nhận sẽ đến trước deadline', timestamp: now,
+          }),
+        });
+        const slotId = buildSlotId(data.roomId, data.appointmentDate, data.appointmentTime);
+        t.delete(db.collection('bookedSlots').doc(slotId));
+        updated = true;
+      });
+      if (!updated) continue;
+      await sendAppNotification(data.tenantId, 'Lịch hẹn đã bị hủy tự động',
+        `Bạn không xác nhận tham dự lịch xem phòng ngày ${data.appointmentDate} trước thời hạn. Lịch hẹn đã bị hủy tự động.`,
+        'appointment_expired');
+      await sendAppNotification(data.landlordId, 'Khách không xác nhận tham dự',
+        `Khách ${data.tenantName || ''} không xác nhận tham dự lịch ngày ${data.appointmentDate} trước thời hạn. Lịch đã bị hủy và slot đã được giải phóng.`,
+        'appointment_tenant_no_confirm');
+    }
+    console.log(`[autoExpireTenantUnconfirmed] Đã xử lý ${snap.size} lịch hẹn.`);
+  }
+);
+
+/**
+ * Nhắc chủ trọ xác nhận lịch pending theo chuỗi leo thang: +12h, +36h, +47h.
+ * Chạy mỗi 1 giờ.
+ */
+exports.remindLandlordPending = onSchedule(
+  { schedule: 'every 1 hours', timeZone: 'Asia/Ho_Chi_Minh' },
+  async () => {
+    const now = Date.now();
+    const h12 = 12 * 3600 * 1000;
+    const h36 = 36 * 3600 * 1000;
+    const h47 = 47 * 3600 * 1000;
+
+    const snap = await db.collection('appointments').where('status', '==', 'pending').get();
+
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      const elapsed = now - (data.createdAt || 0);
+
+      // +12h: nhắc lần đầu
+      if (elapsed >= h12 && !data.landlordRemind12hSent) {
+        let updated = false;
+        await db.runTransaction(async (t) => {
+          const freshDoc = await t.get(doc.ref);
+          if (!freshDoc.exists) return;
+          const fresh = freshDoc.data();
+          if (fresh.status !== 'pending' || fresh.landlordRemind12hSent) return;
+          t.update(doc.ref, { landlordRemind12hSent: true });
+          updated = true;
+        });
+        if (updated) {
+          await sendAppNotification(data.landlordId, 'Còn 36h để xác nhận lịch hẹn',
+            `${data.tenantName} muốn xem phòng vào ${data.appointmentDateDisplay} lúc ${data.appointmentTime}. Bạn còn 36h để xác nhận hoặc từ chối.`,
+            'landlord_remind_12h');
+        }
+      }
+
+      // +36h: nhắc ưu tiên cao
+      if (elapsed >= h36 && !data.landlordRemind36hSent) {
+        let updated = false;
+        await db.runTransaction(async (t) => {
+          const freshDoc = await t.get(doc.ref);
+          if (!freshDoc.exists) return;
+          const fresh = freshDoc.data();
+          if (fresh.status !== 'pending' || fresh.landlordRemind36hSent) return;
+          t.update(doc.ref, { landlordRemind36hSent: true });
+          updated = true;
+        });
+        if (updated) {
+          await sendAppNotification(data.landlordId, '⚠️ Chỉ còn 12h! Sắp hết hạn',
+            `Lịch hẹn với ${data.tenantName} ngày ${data.appointmentDate} sẽ tự hủy sau 12h nữa. Phản hồi ngay!`,
+            'landlord_remind_36h');
+        }
+      }
+
+      // +47h: nhắc khẩn cấp (1 tiếng trước khi tự hủy)
+      if (elapsed >= h47 && !data.landlordRemind47hSent) {
+        let updated = false;
+        await db.runTransaction(async (t) => {
+          const freshDoc = await t.get(doc.ref);
+          if (!freshDoc.exists) return;
+          const fresh = freshDoc.data();
+          if (fresh.status !== 'pending' || fresh.landlordRemind47hSent) return;
+          t.update(doc.ref, { landlordRemind47hSent: true });
+          updated = true;
+        });
+        if (updated) {
+          await sendAppNotification(data.landlordId, '🚨 Còn 1 giờ nữa là tự hủy!',
+            `Lịch hẹn với ${data.tenantName} sẽ TỰ HỦY sau 1 tiếng. Đây là cơ hội cuối để xác nhận!`,
+            'landlord_remind_47h');
+        }
+      }
+    }
+    console.log(`[remindLandlordPending] Đã kiểm tra ${snap.size} lịch pending.`);
+  }
+);
+
+/**
+ * Gửi thông báo nhắc lịch cho cả tenant và landlord: T-24h, T-2h, T-30 phút, T=0.
+ * Chạy mỗi 15 phút.
+ */
+exports.sendAppointmentReminders = onSchedule(
+  { schedule: 'every 15 minutes', timeZone: 'Asia/Ho_Chi_Minh' },
+  async () => {
+    const now = Date.now();
+    const in24h = now + 24 * 3600 * 1000;
+    const in2h  = now + 2  * 3600 * 1000;
+    const in30m = now + 30 * 60   * 1000;
+    const activeStatuses = ['confirmed', 'tenant_confirmed'];
+
+    // ── T-24h: nhắc tenant ──────────────────────────────────────────────────
+    const snap24hTenant = await db.collection('appointments')
+      .where('status', 'in', activeStatuses)
+      .where('appointmentTimestampMs', '>', now)
+      .where('appointmentTimestampMs', '<', in24h)
+      .where('reminder24hSent', '==', false)
+      .get();
+    for (const doc of snap24hTenant.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (!activeStatuses.includes(fresh.status) || fresh.reminder24hSent) return;
+        t.update(doc.ref, { reminder24hSent: true });
+        updated = true;
+      });
+      if (updated) {
+        await sendAppNotification(data.tenantId, 'Nhắc lịch xem phòng ngày mai',
+          `Ngày mai ${data.appointmentDateDisplay} lúc ${data.appointmentTime} bạn có hẹn xem phòng "${data.roomTitle}". Địa chỉ: ${data.roomAddress}.`,
+          'appointment_reminder_24h');
+      }
+    }
+
+    // ── T-24h: nhắc landlord ────────────────────────────────────────────────
+    const snap24hLandlord = await db.collection('appointments')
+      .where('status', 'in', activeStatuses)
+      .where('appointmentTimestampMs', '>', now)
+      .where('appointmentTimestampMs', '<', in24h)
+      .where('landlordReminder24hSent', '==', false)
+      .get();
+    for (const doc of snap24hLandlord.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (!activeStatuses.includes(fresh.status) || fresh.landlordReminder24hSent) return;
+        t.update(doc.ref, { landlordReminder24hSent: true });
+        updated = true;
+      });
+      if (updated) {
+        await sendAppNotification(data.landlordId, 'Khách đến xem phòng ngày mai',
+          `Ngày mai ${data.appointmentDateDisplay} lúc ${data.appointmentTime}, ${data.tenantName} (${data.tenantPhone}) sẽ đến xem phòng "${data.roomTitle}". Hãy chuẩn bị đón tiếp!`,
+          'appointment_landlord_reminder_24h');
+      }
+    }
+
+    // ── T-2h: nhắc tenant ───────────────────────────────────────────────────
+    const snap2hTenant = await db.collection('appointments')
+      .where('status', 'in', activeStatuses)
+      .where('appointmentTimestampMs', '>', now)
+      .where('appointmentTimestampMs', '<', in2h)
+      .where('reminder2hSent', '==', false)
+      .get();
+    for (const doc of snap2hTenant.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (!activeStatuses.includes(fresh.status) || fresh.reminder2hSent) return;
+        t.update(doc.ref, { reminder2hSent: true });
+        updated = true;
+      });
+      if (updated) {
+        await sendAppNotification(data.tenantId, 'Còn 2 tiếng nữa đến giờ hẹn!',
+          `Lịch xem phòng "${data.roomTitle}" lúc ${data.appointmentTime} hôm nay. Đừng quên nhé!`,
+          'appointment_reminder_2h');
+      }
+    }
+
+    // ── T-2h: nhắc landlord ─────────────────────────────────────────────────
+    const snap2hLandlord = await db.collection('appointments')
+      .where('status', 'in', activeStatuses)
+      .where('appointmentTimestampMs', '>', now)
+      .where('appointmentTimestampMs', '<', in2h)
+      .where('landlordReminder2hSent', '==', false)
+      .get();
+    for (const doc of snap2hLandlord.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (!activeStatuses.includes(fresh.status) || fresh.landlordReminder2hSent) return;
+        t.update(doc.ref, { landlordReminder2hSent: true });
+        updated = true;
+      });
+      if (updated) {
+        await sendAppNotification(data.landlordId, 'Còn 2 tiếng nữa khách đến!',
+          `${data.tenantName} sẽ đến xem phòng "${data.roomTitle}" lúc ${data.appointmentTime}. Hãy chuẩn bị sẵn sàng!`,
+          'appointment_landlord_reminder_2h');
+      }
+    }
+
+    // ── T-30m: nhắc tenant ──────────────────────────────────────────────────
+    const snap30mTenant = await db.collection('appointments')
+      .where('status', 'in', activeStatuses)
+      .where('appointmentTimestampMs', '>', now)
+      .where('appointmentTimestampMs', '<', in30m)
+      .where('reminder30mSent', '==', false)
+      .get();
+    for (const doc of snap30mTenant.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (!activeStatuses.includes(fresh.status) || fresh.reminder30mSent) return;
+        t.update(doc.ref, { reminder30mSent: true });
+        updated = true;
+      });
+      if (updated) {
+        await sendAppNotification(data.tenantId, 'Còn 30 phút nữa!',
+          `Sắp đến giờ xem phòng "${data.roomTitle}" lúc ${data.appointmentTime}. Hãy di chuyển ngay!`,
+          'appointment_reminder_30m');
+      }
+    }
+
+    // ── T-30m: nhắc landlord ────────────────────────────────────────────────
+    const snap30mLandlord = await db.collection('appointments')
+      .where('status', 'in', activeStatuses)
+      .where('appointmentTimestampMs', '>', now)
+      .where('appointmentTimestampMs', '<', in30m)
+      .where('landlordReminder30mSent', '==', false)
+      .get();
+    for (const doc of snap30mLandlord.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (!activeStatuses.includes(fresh.status) || fresh.landlordReminder30mSent) return;
+        t.update(doc.ref, { landlordReminder30mSent: true });
+        updated = true;
+      });
+      if (updated) {
+        await sendAppNotification(data.landlordId, 'Khách sắp đến! Còn 30 phút',
+          `${data.tenantName} (${data.tenantPhone}) sắp đến xem phòng "${data.roomTitle}" lúc ${data.appointmentTime}. Hãy có mặt tại phòng!`,
+          'appointment_landlord_reminder_30m');
+      }
+    }
+
+    // ── T=0: nhắc tenant (đúng giờ hẹn) ────────────────────────────────────
+    const snap0hTenant = await db.collection('appointments')
+      .where('status', 'in', activeStatuses)
+      .where('appointmentTimestampMs', '<=', now)
+      .where('reminder0hSent', '==', false)
+      .get();
+    for (const doc of snap0hTenant.docs) {
+      const data = doc.data();
+      if (now - data.appointmentTimestampMs > 30 * 60 * 1000) continue;
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (!activeStatuses.includes(fresh.status) || fresh.reminder0hSent) return;
+        t.update(doc.ref, { reminder0hSent: true });
+        updated = true;
+      });
+      if (updated) {
+        await sendAppNotification(data.tenantId, 'Đã đến giờ hẹn xem phòng!',
+          `Bây giờ là ${data.appointmentTime}. Đến giờ xem phòng "${data.roomTitle}" rồi! Địa chỉ: ${data.roomAddress}.`,
+          'appointment_reminder_0h');
+      }
+    }
+
+    // ── T=0: nhắc landlord ──────────────────────────────────────────────────
+    const snap0hLandlord = await db.collection('appointments')
+      .where('status', 'in', activeStatuses)
+      .where('appointmentTimestampMs', '<=', now)
+      .where('landlordReminder0hSent', '==', false)
+      .get();
+    for (const doc of snap0hLandlord.docs) {
+      const data = doc.data();
+      if (now - data.appointmentTimestampMs > 30 * 60 * 1000) continue;
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (!activeStatuses.includes(fresh.status) || fresh.landlordReminder0hSent) return;
+        t.update(doc.ref, { landlordReminder0hSent: true });
+        updated = true;
+      });
+      if (updated) {
+        await sendAppNotification(data.landlordId, `${data.tenantName} đã đến giờ hẹn`,
+          `${data.tenantName} đang trên đường đến xem phòng "${data.roomTitle}" lúc ${data.appointmentTime}. Bạn đã sẵn sàng chưa?`,
+          'appointment_landlord_reminder_0h');
+      }
+    }
+
+    console.log(`[sendAppointmentReminders] tenant 24h:${snap24hTenant.size} 2h:${snap2hTenant.size} 30m:${snap30mTenant.size} 0h:${snap0hTenant.size} | landlord 24h:${snap24hLandlord.size} 2h:${snap2hLandlord.size} 30m:${snap30mLandlord.size} 0h:${snap0hLandlord.size}`);
+  }
+);
+
+/**
+ * Sau T+30 phút, hỏi chủ trọ kết quả: khách có đến không?
+ * Chạy mỗi 15 phút.
+ */
+exports.autoClosePassedAppointments = onSchedule(
+  { schedule: 'every 15 minutes', timeZone: 'Asia/Ho_Chi_Minh' },
+  async () => {
+    const now = Date.now();
+    const cutoff = now - 30 * 60 * 1000;
+
+    const snap = await db.collection('appointments')
+      .where('status', 'in', ['confirmed', 'tenant_confirmed'])
+      .where('appointmentTimestampMs', '<', cutoff)
+      .where('resultAskedSent', '==', false)
+      .get();
+
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (!['confirmed', 'tenant_confirmed'].includes(fresh.status) || fresh.resultAskedSent) return;
+        t.update(doc.ref, { resultAskedSent: true });
+        updated = true;
+      });
+      if (updated) {
+        await sendAppNotification(data.landlordId,
+          'Lịch hẹn đã qua — Khách có đến không?',
+          `Lịch xem phòng lúc ${data.appointmentTime} với ${data.tenantName} đã qua. Mở app và cập nhật kết quả nhé!`,
+          'appointment_result_ask');
+      }
+    }
+    console.log(`[autoClosePassedAppointments] Đã hỏi kết quả ${snap.size} lịch hẹn.`);
+  }
+);
+
+/**
+ * Tự động đánh no_show nếu chủ trọ không cập nhật kết quả sau 24h.
+ * Chạy mỗi 1 giờ.
+ */
+exports.autoMarkNoShow = onSchedule(
+  { schedule: 'every 1 hours', timeZone: 'Asia/Ho_Chi_Minh' },
+  async () => {
+    const now = Date.now();
+    // T+30m (resultAsked) + 24h = T+24.5h sau giờ hẹn
+    const cutoff = now - 24.5 * 3600 * 1000;
+
+    const snap = await db.collection('appointments')
+      .where('status', 'in', ['confirmed', 'tenant_confirmed'])
+      .where('resultAskedSent', '==', true)
+      .where('autoNoShowSent', '==', false)
+      .where('appointmentTimestampMs', '<', cutoff)
+      .get();
+
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      let updated = false;
+      await db.runTransaction(async (t) => {
+        const freshDoc = await t.get(doc.ref);
+        if (!freshDoc.exists) return;
+        const fresh = freshDoc.data();
+        if (fresh.autoNoShowSent || !['confirmed', 'tenant_confirmed'].includes(fresh.status)) return;
+        t.update(doc.ref, {
+          status: 'no_show',
+          autoNoShowSent: true,
+          hasUnreadUpdate: true,
+          updatedAt: now,
+          statusHistory: admin.firestore.FieldValue.arrayUnion({
+            fromStatus: fresh.status, toStatus: 'no_show',
+            changedBy: 'system', changedById: 'system',
+            reason: 'Chủ trọ không cập nhật kết quả sau 24h', timestamp: now,
+          }),
+        });
+        updated = true;
+      });
+
+      if (!updated) continue;
+
+      // Xóa bookedSlot để mở lại slot
+      const slotId = `${data.roomId}_${data.appointmentDate}_${data.appointmentTime}`
+        .replace(/\//g, '-').replace(/:/g, '-').replace(/ /g, '_');
+      await db.collection('bookedSlots').doc(slotId).delete().catch(() => {});
+
+      // Cộng noShowCount trên tenant
+      if (data.tenantId) {
+        await db.collection('users').doc(data.tenantId)
+          .update({ noShowCount: admin.firestore.FieldValue.increment(1) })
+          .catch(() => {});
+      }
+
+      await sendAppNotification(data.tenantId, 'Lịch hẹn được ghi nhận là không đến',
+        `Chủ trọ chưa cập nhật kết quả sau 24h. Hệ thống tự động ghi nhận bạn không đến lịch hẹn ngày ${data.appointmentDate}.`,
+        'appointment_auto_no_show');
+      await sendAppNotification(data.landlordId, 'Lịch hẹn đã tự động đóng',
+        `Lịch hẹn với ${data.tenantName} ngày ${data.appointmentDate} đã được tự động đóng vì bạn không cập nhật kết quả. Slot đã được mở lại.`,
+        'appointment_auto_no_show_landlord');
+    }
+    console.log(`[autoMarkNoShow] Đã tự động đánh no_show ${snap.size} lịch.`);
+  }
+);

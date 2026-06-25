@@ -62,9 +62,21 @@ service cloud.firestore {
         && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid;
     }
 
+
+    // Phương án A: chỉ Landlord (chủ trọ) mới được tạo slot khóa trong bookedSlots khi confirm lịch
+    // Tenant KHÔNG được phép tạo slot — tránh spam khoá giờ ảo
+    function isAppointmentLandlordAfter(apptId) {
+      return isSignedIn()
+        && existsAfter(/databases/$(database)/documents/appointments/$(apptId))
+        && (
+          isAdmin()
+          || request.auth.uid == getAfter(/databases/$(database)/documents/appointments/$(apptId)).data.landlordId
+        );
+    }
+
     // USERS
     match /users/{userId} {
-      allow read: if true;
+      allow read: if isSignedIn();
 
       allow create: if isAdmin() || (
         isSignedIn()
@@ -89,14 +101,19 @@ service cloud.firestore {
             "address",
             "birthday",
             "gender",
-            "occupation",
             "avatarUrl",
             "fcmToken",
             "lastLoginAt",
             "isOnline",
             "lastSeen",
             "hasAcceptedRules",
-            "role"
+            "role",
+            "dailyPostCount",
+            "dailyPostCountDate",
+            "lastLogin",
+            "lastDevice",
+            "lastOsVersion",
+            "bio"
           ])
           || (
             request.resource.data.diff(resource.data).changedKeys().hasOnly([
@@ -113,12 +130,19 @@ service cloud.firestore {
 
       allow delete: if isAdmin();
 
+      match /ai_conversations/{messageId} {
+        allow read, write: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      match /active_devices/{deviceId} {
+        allow read, write: if isSignedIn() && request.auth.uid == userId;
+      }
     }
 
     // ROOMS
     match /rooms/{roomId} {
       allow read: if resource.data.status in ["approved", "expired"]
-                  || (isSignedIn() && resource.data.userId == request.auth.uid)
+                  || (isSignedIn() && (resource.data.status == "rented" || resource.data.userId == request.auth.uid))
                   || isAdmin();
 
       allow create: if canPostRoom()
@@ -133,18 +157,21 @@ service cloud.firestore {
                       && request.resource.data.diff(resource.data).changedKeys().hasOnly([
                         "featuredRequestStatus",
                         "featuredRequestId",
-                        "featuredRequestUpdatedAt"
+                        "featuredRequestUpdatedAt",
+                        "featuredRequestRejectReason"
                       ])
                       && request.resource.data.featuredRequestStatus in [
                         "waiting_for_payment",
                         "paid_waiting_admin",
-                        "cancelled"
+                        "cancelled",
+                        "rejected"
                       ]
                     )
                     || (
                       isSignedIn()
                       && resource.data.userId == request.auth.uid
                       && request.resource.data.userId == resource.data.userId
+                      && request.resource.data.status == "pending"
                       && !request.resource.data.diff(resource.data).changedKeys().hasAny([
                         "isFeatured",
                         "featuredStartAt",
@@ -181,14 +208,7 @@ service cloud.firestore {
 
     // APPOINTMENTS
     match /appointments/{apptId} {
-      allow read: if isAdmin()
-                  || (
-                    isSignedIn()
-                    && (
-                      request.auth.uid == resource.data.tenantId
-                      || request.auth.uid == resource.data.landlordId
-                    )
-                  );
+      allow read: if isSignedIn();
 
       allow create: if isSignedIn()
                     && request.resource.data.tenantId == request.auth.uid
@@ -220,7 +240,12 @@ service cloud.firestore {
     // BOOKED SLOTS
     match /bookedSlots/{slotId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin() || isAppointmentParticipant(slotId);
+      // PHƯƠNG ÁN A: Chỉ Landlord của lịch hẹn (hoặc Admin) mới được tạo slot khoá
+      // Tenant không có quyền tạo — loại bỏ nguy cơ spam khoá giờ ảo
+      allow create: if isAdmin() || isAppointmentLandlordAfter(request.resource.data.appointmentId);
+      // update: appointment đã tồn tại sẵn → dùng exists() thông thường là đúng
+      allow update: if isAdmin() || isAppointmentParticipant(resource.data.appointmentId);
+      allow delete: if isAdmin() || isAppointmentParticipant(resource.data.appointmentId);
     }
 
     // SAVED POSTS
@@ -230,6 +255,11 @@ service cloud.firestore {
                     isAdmin()
                     || resource == null
                     || resource.data.userId == request.auth.uid
+                    || (
+                      resource.data.roomId is string
+                      && exists(/databases/$(database)/documents/rooms/$(resource.data.roomId))
+                      && get(/databases/$(database)/documents/rooms/$(resource.data.roomId)).data.userId == request.auth.uid
+                    )
                   );
 
       allow create: if isSignedIn()
@@ -251,10 +281,10 @@ service cloud.firestore {
                     && request.resource.data.uid == request.auth.uid
                     && request.resource.data.requestId == requestId
                     && request.resource.data.status == "waiting_for_payment"
-                    && request.resource.data.amount is int
-                    && request.resource.data.slots is int
-                    && request.resource.data.createdAt is int
-                    && request.resource.data.expiresAt is int;
+                    && request.resource.data.amount is number
+                    && request.resource.data.slots is number
+                    && request.resource.data.createdAt is number
+                    && request.resource.data.expiresAt is number;
 
       allow update: if isAdmin()
                     || (
@@ -285,62 +315,46 @@ service cloud.firestore {
                     && request.resource.data.status == "waiting_for_payment"
                     && request.resource.data.approvalStatus == "pending_payment"
                     && request.resource.data.roomId is string
-                    && request.resource.data.amount is int
-                    && request.resource.data.days is int
-                    && request.resource.data.createdAt is int
-                    && request.resource.data.expiresAt is int;
+                    && request.resource.data.amount is number
+                    && request.resource.data.days is number
+                    && request.resource.data.createdAt is number
+                    && request.resource.data.expiresAt is number;
 
       allow update: if isAdmin()
                     || (
                       isSignedIn()
                       && resource.data.uid == request.auth.uid
-                      && resource.data.status == "waiting_for_payment"
                       && request.resource.data.uid == resource.data.uid
                       && request.resource.data.requestId == resource.data.requestId
-                      && request.resource.data.diff(resource.data).changedKeys().hasOnly([
-                        "status",
-                        "approvalStatus",
-                        "cancelledAt",
-                        "updatedAt"
-                      ])
-                      && request.resource.data.status == "cancelled"
-                      && request.resource.data.approvalStatus == "cancelled"
+                      && (
+                        (
+                          resource.data.status == "waiting_for_payment"
+                          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+                            "status",
+                            "approvalStatus",
+                            "cancelledAt",
+                            "updatedAt"
+                          ])
+                          && request.resource.data.status == "cancelled"
+                          && request.resource.data.approvalStatus == "cancelled"
+                        )
+                        ||
+                        (
+                          resource.data.status == "rejected"
+                          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+                            "status",
+                            "approvalStatus",
+                            "rejectReason",
+                            "updatedAt"
+                          ])
+                          && request.resource.data.status == "paid_waiting_admin"
+                          && request.resource.data.approvalStatus == "pending_admin_review"
+                          && request.resource.data.rejectReason == ""
+                        )
+                      )
                     );
 
       allow delete: if isAdmin();
-    }
-
-    // REVIEWS
-    match /reviews/{reviewId} {
-      allow read: if true;
-
-      allow create: if isSignedIn()
-                    && request.resource.data.userId == request.auth.uid
-                    && request.resource.data.landlordId is string
-                    && request.resource.data.landlordId != request.auth.uid
-                    && request.resource.data.roomId is string
-                    && request.resource.data.rating is int
-                    && request.resource.data.rating >= 1
-                    && request.resource.data.rating <= 5
-                    && request.resource.data.comment is string
-                    && request.resource.data.status == "approved";
-
-      allow update: if isAdmin()
-                    || (
-                      isSignedIn()
-                      && resource.data.userId == request.auth.uid
-                      && request.resource.data.userId == resource.data.userId
-                      && request.resource.data.landlordId == resource.data.landlordId
-                      && request.resource.data.roomId == resource.data.roomId
-                      && request.resource.data.diff(resource.data).changedKeys().hasOnly([
-                        "rating",
-                        "comment",
-                        "updatedAt"
-                      ])
-                    );
-
-      allow delete: if isAdmin()
-                    || (isSignedIn() && resource.data.userId == request.auth.uid);
     }
 
     // NOTIFICATIONS
@@ -355,8 +369,10 @@ service cloud.firestore {
                     && request.resource.data.userId is string
                     && request.resource.data.title is string
                     && request.resource.data.message is string
-                    && request.resource.data.createdAt is int
-                    && request.resource.data.seen == false;
+                    && (request.resource.data.createdAt is timestamp || request.resource.data.createdAt is number)
+                    && request.resource.data.seen == false
+                    // Bảo mật: Nếu có trường senderId thì phải khớp với UID của chính mình (chống giả mạo người gửi)
+                    && (!("senderId" in request.resource.data) || request.resource.data.senderId == request.auth.uid);
 
       allow update, delete: if isSignedIn()
                             && (
@@ -380,7 +396,8 @@ service cloud.firestore {
         allow read: if isChatParticipant(chatId);
 
         allow create: if isChatParticipant(chatId)
-                      && request.auth.uid == request.resource.data.senderId;
+                      && request.auth.uid == request.resource.data.senderId
+                      && (request.resource.data.createdAt is timestamp || request.resource.data.createdAt is number);
 
         allow update, delete: if isChatParticipant(chatId);
       }
@@ -450,8 +467,8 @@ service cloud.firestore {
       allow create: if isSignedIn()
                     && request.resource.data.uid == request.auth.uid
                     && request.resource.data.cccdNumber == cccdNumber
-                    && request.resource.data.createdAt is int
-                    && request.resource.data.updatedAt is int;
+                    && request.resource.data.createdAt is number
+                    && request.resource.data.updatedAt is number;
 
       allow update: if isSignedIn()
                     && resource.data.uid == request.auth.uid
@@ -466,14 +483,58 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
+    // SYSTEM CONFIGS
+    match /system_configs/{configId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
     // Internal checks
     match /checks/{docId} {
       allow read, write: if isAdmin();
     }
 
-    // Server-side OCR counter
+    // Server-side OCR counter — user can read/write own counter; admin has full access
     match /verification_counters/{uid} {
+      allow read, write: if isAdmin() || request.auth.uid == uid;
+    }
+
+    // Phone registry — public read để kiểm tra trùng SĐT trước khi đăng ký (chưa có auth).
+    // LƯU Ý BẢO MẬT: Bật Firebase App Check để ngăn dò số điện thoại hàng loạt từ client lạ.
+    match /phone_registry/{phone} {
+      allow read: if true;
+
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.phone == phone;
+
+      // batch.set() trên document đã tồn tại được Firestore coi là UPDATE, không phải CREATE.
+      // Cần rule này để tránh PERMISSION_DENIED khi user đổi số điện thoại lần thứ hai trở đi.
+      allow update: if isSignedIn()
+                    && resource.data.uid == request.auth.uid
+                    && request.resource.data.uid == resource.data.uid
+                    && request.resource.data.phone == phone;
+
+      allow delete: if isAdmin()
+                    || (isSignedIn() && (resource == null || resource.data.uid == request.auth.uid));
+    }
+
+    // STATS — Popular areas etc (M3)
+    match /stats/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ADMIN AUDIT LOGS (M8)
+    match /admin_logs/{docId} {
       allow read, write: if isAdmin();
     }
+
+    // PROCESSED PAYMENTS — immutable from client (M8)
+    match /processed_payments/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
   }
 }

@@ -1,0 +1,74 @@
+{
+  "scripts": {
+    "lint": "eslint public/js/*.js",
+    "lint:fix": "eslint public/js/*.js --fix",
+    "format": "prettier --write public/js/*.js"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^10.4.0",
+    "firebase-admin": "^13.8.0",
+    "jsdom": "^29.1.1"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.1",
+    "prettier": "^3.8.3"
+  },
+  "eslintConfig": {
+    "env": {
+      "browser": true,
+      "es2021": true
+    },
+    "globals": {
+      "db": "readonly",
+      "auth": "readonly",
+      "functions": "readonly",
+      "storage": "readonly",
+      "firebase": "readonly",
+      "STATUS": "readonly",
+      "state": "writable",
+      "cursorMode": "writable",
+      "PAGE_SIZE": "readonly",
+      "MAX_SEARCH_DOCS": "readonly",
+      "CF_DELETE_USER_URL": "readonly",
+      "activeListeners": "writable",
+      "selectedPostIds": "writable",
+      "selectedUserIds": "writable",
+      "selectedFeaturedIds": "writable",
+      "selectedPaymentsIds": "writable",
+      "selectedSupportIds": "writable",
+      "postsSearchKeyword": "writable",
+      "usersSearchKeyword": "writable",
+      "featuredSearchKw": "writable",
+      "paymentsSearchKw": "writable"
+    },
+    "rules": {
+      "no-console": [
+        "warn",
+        {
+          "allow": [
+            "error"
+          ]
+        }
+      ],
+      "no-empty": "error",
+      "eqeqeq": [
+        "warn",
+        "always"
+      ],
+      "no-unused-vars": [
+        "warn",
+        {
+          "argsIgnorePattern": "^_"
+        }
+      ],
+      "no-undef": "warn"
+    }
+  },
+  "prettier": {
+    "semi": true,
+    "singleQuote": true,
+    "tabWidth": 2,
+    "trailingComma": "es5",
+    "printWidth": 100
+  }
+}

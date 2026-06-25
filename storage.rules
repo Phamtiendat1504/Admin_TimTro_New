@@ -79,7 +79,10 @@ service firebase.storage {
 
     match /support_images/{ticketId}/{fileName=**} {
       allow read: if isAdmin() || isSupportTicketOwner(ticketId);
-      allow write: if (isAdmin() || isSupportTicketOwner(ticketId))
+      // Cho phép upload khi: (1) admin, (2) chủ ticket, HOẶC (3) ticket chưa tồn tại
+      // — trường hợp (3) xảy ra khi user tạo ticket mới (upload ảnh trước khi ghi Firestore)
+      allow write: if isSignedIn()
+        && (isAdmin() || isSupportTicketOwner(ticketId) || !supportTicketExists(ticketId))
         && (isDelete() || isImageUpload(10 * 1024 * 1024));
     }
 
